@@ -2,9 +2,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowDownLeft, ArrowLeftRight, ArrowUpRight, Barcode, Boxes, CalendarDays, ChevronDown, CircleDollarSign,
   Command, CreditCard, LayoutDashboard, LogOut, Minus, PackagePlus, Plus, Search, ShieldCheck,
-  ShoppingBasket, ShoppingCart, TrendingUp, Wallet, X, Users, Truck, Banknote, ReceiptText, RotateCcw, Download,
+  ShoppingBasket, ShoppingCart, TrendingUp, X, Users, Truck, Banknote, ReceiptText, RotateCcw, Download,
+  Pause, Printer, Trash2,
 } from "lucide-react";
 import { lazy, Suspense, useMemo, useRef, useState } from "react";
+import { useEffect } from "react";
 import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -369,6 +371,11 @@ function InventoryPage({ user }: { user: User }) {
   const [expiryDate, setExpiryDate] = useState("");
   const [selectedTakeId, setSelectedTakeId] = useState<number | null>(null);
   const [counts, setCounts] = useState<Record<number, string>>({});
+  const [transferDestinationId, setTransferDestinationId] = useState("");
+  const [transferLines, setTransferLines] = useState([{ productId: "", quantity: "1" }]);
+  const [transferNotes, setTransferNotes] = useState("");
+  const [selectedTransferId, setSelectedTransferId] = useState<number | null>(null);
+  const [receivedQuantities, setReceivedQuantities] = useState<Record<number, string>>({});
   const adjust = useMutation({
     mutationFn: () => api.post("/inventory/adjustments", {
       productId: Number(productId), direction, quantity, reason,
@@ -398,6 +405,37 @@ function InventoryPage({ user }: { user: User }) {
       countedItems: number; totalItems: number;
     }> }>("/inventory/stock-takes")).data.stockTakes,
     enabled: canAdjust,
+  });
+  const transferBranches = useQuery({
+    queryKey: ["transfer-branches"],
+    queryFn: async () => (await api.get<{ branches: Array<{ id: number; name: string; code: string }> }>("/inventory/transfer-branches")).data.branches,
+    enabled: canAdjust,
+  });
+  const transferProducts = useQuery({
+    queryKey: ["transfer-products"],
+    queryFn: async () => (await api.get<{ products: Array<{ id: number; sku: string; name: string; unit: string; stock: string }> }>("/products")).data.products,
+    enabled: canAdjust,
+  });
+  const transfers = useQuery({
+    queryKey: ["inventory-transfers"],
+    queryFn: async () => (await api.get<{ transfers: Array<{
+      id: number; reference: string; sourceBranchId: number; sourceBranch: string; destinationBranchId: number;
+      destinationBranch: string; status: string; createdAt: string; itemCount: number;
+      quantityDispatched: string | null; quantityReceived: string | null;
+    }> }>("/inventory/transfers")).data.transfers,
+    enabled: canAdjust,
+  });
+  const selectedTransfer = useQuery({
+    queryKey: ["inventory-transfer", selectedTransferId],
+    queryFn: async () => (await api.get<{ transfer: {
+      id: number; reference: string; sourceBranchId: number; sourceBranch: string; destinationBranchId: number;
+      destinationBranch: string; status: string; notes: string | null;
+      items: Array<{
+        productId: number; sku: string; name: string; unit: string; quantityRequested: string;
+        quantityDispatched: string | null; quantityReceived: string | null; quantityVariance: string | null;
+      }>;
+    } }>(`/inventory/transfers/${selectedTransferId}`)).data.transfer,
+    enabled: canAdjust && selectedTransferId !== null,
   });
   const selectedTake = useQuery({
     queryKey: ["stock-take", selectedTakeId],
@@ -435,8 +473,60 @@ function InventoryPage({ user }: { user: User }) {
     },
     onError: (reason) => setError(getErrorMessage(reason)),
   });
+  const createTransfer = useMutation({
+    mutationFn: async () => (await api.post<{ id: number }>("/inventory/transfers", {
+      destinationBranchId: Number(transferDestinationId),
+      notes: transferNotes,
+      items: transferLines.map((item) => ({ productId: Number(item.productId), quantity: item.quantity })),
+    })).data,
+    onSuccess: () => {
+      setTransferLines([{ productId: "", quantity: "1" }]);
+      setTransferNotes("");
+      setError("");
+      void query.invalidateQueries({ queryKey: ["inventory-transfers"] });
+    },
+    onError: (reason) => setError(getErrorMessage(reason)),
+  });
+  const dispatchTransfer = useMutation({
+    mutationFn: (id: number) => api.post(`/inventory/transfers/${id}/dispatch`),
+    onSuccess: () => {
+      setError("");
+      void query.invalidateQueries({ queryKey: ["inventory-transfers"] });
+      void query.invalidateQueries({ queryKey: ["inventory"] });
+      void query.invalidateQueries({ queryKey: ["products"] });
+      void query.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+    onError: (reason) => setError(getErrorMessage(reason)),
+  });
+  const receiveTransfer = useMutation({
+    mutationFn: () => api.post(`/inventory/transfers/${selectedTransferId}/receive`, {
+      items: selectedTransfer.data!.items.map((item) => ({
+        productId: item.productId,
+        receivedQuantity: receivedQuantities[item.productId] ?? item.quantityDispatched ?? "0",
+      })),
+    }),
+    onSuccess: () => {
+      setSelectedTransferId(null);
+      setReceivedQuantities({});
+      setError("");
+      void query.invalidateQueries({ queryKey: ["inventory-transfers"] });
+      void query.invalidateQueries({ queryKey: ["inventory"] });
+      void query.invalidateQueries({ queryKey: ["inventory-expiry"] });
+      void query.invalidateQueries({ queryKey: ["products"] });
+      void query.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+    onError: (reason) => setError(getErrorMessage(reason)),
+  });
   const takeCompleteEnabled = Boolean(selectedTake.data?.items.length)
     && selectedTake.data!.items.every((item) => /^\d{1,9}(\.\d{1,3})?$/.test(counts[item.productId] ?? item.countedQuantity ?? ""));
+  const transferCreateEnabled = Boolean(transferDestinationId)
+    && transferLines.length > 0
+    && transferLines.every((item) => /^[1-9]\d*$/.test(item.productId) && /^\d{1,9}(\.\d{1,3})?$/.test(item.quantity) && Number(item.quantity) > 0);
+  const transferReceiveEnabled = Boolean(selectedTransfer.data?.items.length)
+    && selectedTransfer.data!.items.every((item) => {
+      const value = receivedQuantities[item.productId] ?? item.quantityDispatched ?? "";
+      return /^\d{1,9}(\.\d{1,3})?$/.test(value) && Number(value) <= Number(item.quantityDispatched);
+    });
   return (
     <section className="page-content operations-page">
       <PageHeader eyebrow="STOCK CONTROL" title="Inventory" detail="Branch stock balances and an auditable movement ledger." />
@@ -474,6 +564,56 @@ function InventoryPage({ user }: { user: User }) {
             return <tr key={batch.id}><td><div className="report-product"><strong>{batch.name}</strong><small>{batch.sku}</small></div></td><td>{batch.batchCode ?? "—"}</td><td>{batch.expiryDate}</td><td>{Number(batch.quantity).toLocaleString("en-KE")} {batch.unit}</td><td><span className={`product-status ${expired ? "status-low" : ""}`}><i /> {expired ? "EXPIRED" : "EXPIRING"}</span></td></tr>;
           })}
         </tbody></table>{!expiry.isPending && !expiry.data?.length && <EmptyState title="No near-expiry stock" detail="Tracked batches expiring within 90 days will appear here." />}</div>
+      </section>}
+      {canAdjust && <section className="panel operation-form-panel">
+        <div className="panel-heading"><div><div className="eyebrow">BRANCH OPERATIONS</div><h2>Inter-branch transfers</h2></div></div>
+        {transferBranches.isError && <ErrorBanner message={getErrorMessage(transferBranches.error)} onRetry={() => void transferBranches.refetch()} />}
+        {transferProducts.isError && <ErrorBanner message={getErrorMessage(transferProducts.error)} onRetry={() => void transferProducts.refetch()} />}
+        {transferBranches.data?.length ? <form className="operation-form" onSubmit={(event) => { event.preventDefault(); setError(""); createTransfer.mutate(); }}>
+          <label>Destination branch<select value={transferDestinationId} onChange={(event) => setTransferDestinationId(event.target.value)} required><option value="">Select branch</option>{transferBranches.data.map((branch) => <option value={branch.id} key={branch.id}>{branch.name} · {branch.code}</option>)}</select></label>
+          <label>Notes<input value={transferNotes} onChange={(event) => setTransferNotes(event.target.value)} maxLength={500} placeholder="Optional transfer notes" /></label>
+          {transferLines.map((item, index) => <div className="transfer-form-line" key={index}>
+            <label>Product<select value={item.productId} onChange={(event) => setTransferLines((current) => current.map((line, lineIndex) => lineIndex === index ? { ...line, productId: event.target.value } : line))} required><option value="">Select product</option>{transferProducts.data?.map((product) => <option value={product.id} key={product.id}>{product.name} · {product.sku} · {Number(product.stock).toFixed(3)} available</option>)}</select></label>
+            <label>Quantity<input type="number" min="0.001" step="0.001" value={item.quantity} onChange={(event) => setTransferLines((current) => current.map((line, lineIndex) => lineIndex === index ? { ...line, quantity: event.target.value } : line))} required /></label>
+            {transferLines.length > 1 && <button className="small-action" type="button" onClick={() => setTransferLines((current) => current.filter((_, lineIndex) => lineIndex !== index))}>Remove</button>}
+          </div>)}
+          <div className="transfer-form-actions">
+            <button className="small-action" type="button" onClick={() => setTransferLines((current) => [...current, { productId: "", quantity: "1" }])} disabled={transferLines.length >= 100}>Add product</button>
+            <button className="button button-dark" disabled={!transferCreateEnabled || createTransfer.isPending}>{createTransfer.isPending ? "Saving…" : "Create draft transfer"}</button>
+          </div>
+          <p className="operation-note">Stock moves only when the source branch dispatches. The destination branch records received quantities and any shortage.</p>
+        </form> : !transferBranches.isPending && <EmptyState title="No destination branches" detail="Add another branch before creating an inter-branch transfer." />}
+        {transfers.isError && <ErrorBanner message={getErrorMessage(transfers.error)} onRetry={() => void transfers.refetch()} />}
+        <div className="product-table-wrap"><table className="product-table"><thead><tr><th>REFERENCE</th><th>FROM / TO</th><th>ITEMS</th><th>STATUS</th><th>CREATED</th><th>ACTION</th></tr></thead><tbody>
+          {transfers.data?.map((transfer) => <tr key={transfer.id}>
+            <td className="sku-cell">{transfer.reference}</td>
+            <td>{transfer.sourceBranch} → {transfer.destinationBranch}</td>
+            <td>{transfer.itemCount}{transfer.quantityDispatched ? ` · sent ${Number(transfer.quantityDispatched).toFixed(3)}` : ""}{transfer.quantityReceived ? ` · received ${Number(transfer.quantityReceived).toFixed(3)}` : ""}</td>
+            <td><span className={`product-status ${transfer.status === "in_transit" ? "status-low" : ""}`}><i /> {transfer.status.replace("_", " ").toUpperCase()}</span></td>
+            <td>{new Date(transfer.createdAt).toLocaleDateString("en-KE")}</td>
+            <td className="row-actions">
+              {transfer.status === "draft" && transfer.sourceBranchId === user.branchId && <button className="small-action" onClick={() => dispatchTransfer.mutate(transfer.id)} disabled={dispatchTransfer.isPending}>Dispatch</button>}
+              {transfer.status === "in_transit" && transfer.destinationBranchId === user.branchId && <button className="small-action" onClick={() => { setSelectedTransferId(transfer.id); setReceivedQuantities({}); }}>Receive</button>}
+              <button className="small-action" onClick={() => { setSelectedTransferId(transfer.id); setReceivedQuantities({}); }}>Details</button>
+            </td>
+          </tr>)}
+        </tbody></table>{!transfers.isPending && !transfers.data?.length && <EmptyState title="No transfers yet" detail="Draft transfers will appear for both sending and receiving branches." />}</div>
+        {selectedTransferId !== null && <div className="stock-count-editor">
+          <div className="panel-heading"><div><div className="eyebrow">TRANSFER DETAILS</div><h2>{selectedTransfer.data?.reference ?? "Loading transfer…"}</h2></div><button className="small-action" onClick={() => setSelectedTransferId(null)}>Close</button></div>
+          {selectedTransfer.isError && <ErrorBanner message={getErrorMessage(selectedTransfer.error)} onRetry={() => void selectedTransfer.refetch()} />}
+          {selectedTransfer.data && <>
+            <p className="operation-note">{selectedTransfer.data.sourceBranch} → {selectedTransfer.data.destinationBranch}{selectedTransfer.data.notes ? ` · ${selectedTransfer.data.notes}` : ""}</p>
+            <div className="product-table-wrap"><table className="product-table"><thead><tr><th>PRODUCT</th><th>REQUESTED / SENT</th><th>RECEIVED</th>{selectedTransfer.data.status === "in_transit" && selectedTransfer.data.destinationBranchId === user.branchId && <th>RECEIVING COUNT</th>}</tr></thead><tbody>
+              {selectedTransfer.data.items.map((item) => <tr key={item.productId}>
+                <td><div className="report-product"><strong>{item.name}</strong><small>{item.sku} · {item.unit}</small></div></td>
+                <td>{Number(item.quantityRequested).toFixed(3)} / {item.quantityDispatched === null ? "—" : Number(item.quantityDispatched).toFixed(3)}</td>
+                <td>{item.quantityReceived === null ? "—" : <>{Number(item.quantityReceived).toFixed(3)}{item.quantityVariance && Number(item.quantityVariance) !== 0 ? ` (${Number(item.quantityVariance).toFixed(3)})` : ""}</>}</td>
+                {selectedTransfer.data.status === "in_transit" && selectedTransfer.data.destinationBranchId === user.branchId && <td><input aria-label={`Received ${item.name}`} type="number" min="0" max={item.quantityDispatched ?? undefined} step="0.001" value={receivedQuantities[item.productId] ?? item.quantityDispatched ?? ""} onChange={(event) => setReceivedQuantities((current) => ({ ...current, [item.productId]: event.target.value }))} /></td>}
+              </tr>)}
+            </tbody></table></div>
+            {selectedTransfer.data.status === "in_transit" && selectedTransfer.data.destinationBranchId === user.branchId && <button className="button button-dark" onClick={() => receiveTransfer.mutate()} disabled={!transferReceiveEnabled || receiveTransfer.isPending}>{receiveTransfer.isPending ? "Recording receipt…" : "Confirm receipt"}</button>}
+          </>}
+        </div>}
       </section>}
       {canAdjust && <section className="panel operation-table-panel">
         <div className="panel-heading"><div><div className="eyebrow">PHYSICAL INVENTORY</div><h2>Stock counts</h2></div><button className="button button-dark" onClick={() => startTake.mutate()} disabled={startTake.isPending}>{startTake.isPending ? "Starting…" : "Start full count"}</button></div>
@@ -963,11 +1103,33 @@ function PosPage({ user }: { user: User }) {
   const [toast, setToast] = useState("");
   const [checkoutError, setCheckoutError] = useState("");
   const [openingCash, setOpeningCash] = useState("0.00");
+  const [discountPercent, setDiscountPercent] = useState("0");
+  const [amountPaid, setAmountPaid] = useState("");
+  const [heldSalesOpen, setHeldSalesOpen] = useState(false);
   const scannerRef = useRef<HTMLInputElement>(null);
   const idempotencyRef = useRef<string | null>(null);
   const activeShift = useQuery({
     queryKey: ["active-shift"],
     queryFn: async () => (await api.get<{ shift: { id: number; openingCash: string; openedAt: string } | null }>("/shifts/active")).data.shift,
+  });
+  const heldSalesQuery = useQuery({
+    queryKey: ["held-sales"],
+    queryFn: async () => (await api.get<{ sales: Array<{
+      id: number; holdNumber: string; items: Array<{ productId: number; quantity: string }>;
+      discount: string; createdAt: string;
+    }> }>("/sales/held")).data.sales,
+  });
+  const holdSaleMutation = useMutation({
+    mutationFn: () => api.post("/sales/held", {
+      discount: discountAmountCents > 0 ? fromCents(discountAmountCents) : "0.00",
+      items: cart.map((item) => ({ productId: item.product.id, quantity: String(item.quantity) })),
+    }),
+    onSuccess: () => {
+      setCart([]);
+      setToast("Sale held successfully.");
+      void queryClient.invalidateQueries({ queryKey: ["held-sales"] });
+    },
+    onError: (error) => setCheckoutError(getErrorMessage(error)),
   });
   const openShiftMutation = useMutation({
     mutationFn: async () => (await api.post<{ id: number; openingCash: string }>("/shifts/open", { openingCash })).data,
@@ -987,8 +1149,8 @@ function PosPage({ user }: { user: User }) {
       if (!idempotencyRef.current) idempotencyRef.current = crypto.randomUUID();
       const body = {
         items: cart.map((item) => ({ productId: item.product.id, quantity: String(item.quantity) })),
-        discount: "0.00",
-        payments: [{ method: "cash", amount: fromCents(totalCents) }],
+        discount: fromCents(discountAmountCents),
+        payments: [{ method: "cash", amount: fromCents(payableCents) }],
       };
       return (await api.post<{ sale: { receiptNumber: string; total: string; status: string } }>("/sales", body, {
         headers: { "Idempotency-Key": idempotencyRef.current },
@@ -1002,6 +1164,26 @@ function PosPage({ user }: { user: User }) {
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       void queryClient.invalidateQueries({ queryKey: ["products"] });
       window.setTimeout(() => setToast(""), 5000);
+    },
+    onError: (error) => setCheckoutError(getErrorMessage(error)),
+  });
+  const retrieveHeldSaleMutation = useMutation({
+    mutationFn: (id: number) => api.post<{ sale: {
+      items: Array<{ productId: number; quantity: string }>;
+      discount: string;
+    } }>(`/sales/held/${id}/retrieve`),
+    onSuccess: async ({ data }) => {
+      const { data: catalogue } = await api.get<{ products: Product[] }>("/products");
+      const restored: Array<{ product: Product; quantity: number }> = [];
+      for (let index = 0; index < data.sale.items.length; index += 1) {
+        const line = data.sale.items[index];
+        const product = catalogue.products.find((candidate) => candidate.id === line.productId);
+        if (product) restored.push({ product, quantity: Number(line.quantity) });
+      }
+      setCart(restored);
+      setHeldSalesOpen(false);
+      setToast("Held sale retrieved.");
+      void queryClient.invalidateQueries({ queryKey: ["held-sales"] });
     },
     onError: (error) => setCheckoutError(getErrorMessage(error)),
   });
@@ -1040,42 +1222,109 @@ function PosPage({ user }: { user: User }) {
       ? { ...item, quantity: Math.max(0, Math.min(item.quantity + amount, Math.floor(Number(item.product.stock)))) }
       : item)
     .filter((item) => item.quantity > 0));
+  const subtotalCents = useMemo(() => cart.reduce((sum, item) =>
+    sum + cents(item.product.sellingPrice) * item.quantity, 0), [cart]);
+  const discountPercentNumber = Math.min(100, Math.max(0, Number(discountPercent) || 0));
+  const discountAmountCents = Math.round(subtotalCents * discountPercentNumber / 100);
+  const taxCents = useMemo(() => cart.reduce((sum, item) => {
+    const line = cents(item.product.sellingPrice) * item.quantity;
+    const factor = subtotalCents === 0 ? 1 : (subtotalCents - discountAmountCents) / subtotalCents;
+    return sum + Math.round(Math.round(line * factor) * Number(item.product.taxRate) / 100);
+  }, 0), [cart, subtotalCents, discountAmountCents]);
+  const payableCents = subtotalCents - discountAmountCents + taxCents;
+  const amountPaidCents = Math.round((Number(amountPaid) || 0) * 100);
+  const balanceCents = Math.max(0, payableCents - amountPaidCents);
+  const changeCents = Math.max(0, amountPaidCents - payableCents);
+  useEffect(() => {
+    const handleKey = (event: globalThis.KeyboardEvent) => {
+      if (event.target instanceof HTMLInputElement) return;
+      if (event.key === "F3") { event.preventDefault(); scannerRef.current?.focus(); }
+      if (event.key === "F4") { event.preventDefault(); scannerRef.current?.focus(); }
+      if (event.key === "F5") { event.preventDefault(); setCart([]); setAmountPaid(""); setCheckoutError(""); }
+      if (event.key === "F6") { event.preventDefault(); if (cart.length) holdSaleMutation.mutate(); }
+      if (event.key === "F7") { event.preventDefault(); setHeldSalesOpen((open) => !open); void heldSalesQuery.refetch(); }
+      if (event.key === "F9") {
+        event.preventDefault();
+        if (canSell && cart.length && activeShift.data && !checkout.isPending) checkout.mutate();
+      }
+      if (event.key === "Escape") { event.preventDefault(); setCart([]); setHeldSalesOpen(false); }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [cart.length, canSell, activeShift.data, checkout.isPending, holdSaleMutation, heldSalesQuery]);
 
   return (
-    <section className="pos-page">
-      <div className="pos-heading"><div><div className="eyebrow"><span className="eyebrow-dot" /> CHECKOUT</div><h1>Make a sale<span className="heading-period">.</span></h1><p>Scan a barcode or find something by name.</p></div><div className="pos-session"><span className="status-dot" /> CASHIER SESSION <strong>ACTIVE</strong></div></div>
+    <section className="pos-page pos-desktop">
+      <header className="pos-appbar">
+        <Link to="/" className="pos-brand"><span className="brand-mark">s</span><strong>Smart POS</strong></Link>
+        <nav className="pos-nav" aria-label="POS navigation">
+          <NavLink to="/pos" className={({ isActive }) => isActive ? "active" : ""}><ShoppingBasket size={17} /> Sales</NavLink>
+          <NavLink to="/inventory"><Boxes size={17} /> Inventory</NavLink>
+          <NavLink to="/reports"><TrendingUp size={17} /> Reports</NavLink>
+          <NavLink to="/staff"><Users size={17} /> Settings</NavLink>
+        </nav>
+        <div className="pos-user"><span>{user.name}</span><button onClick={() => setCart([])} title="Clear cart">−</button><i /><button onClick={() => window.location.assign("/")} aria-label="Close POS workspace" title="Close POS">×</button></div>
+      </header>
       {toast && <div role="status" className="success-banner"><ShieldCheck size={17} /> {toast}<button onClick={() => setToast("")} aria-label="Dismiss"><X size={15} /></button></div>}
       {checkoutError && <ErrorBanner message={checkoutError} onRetry={() => setCheckoutError("")} />}
       {activeShift.isError && <ErrorBanner message={getErrorMessage(activeShift.error)} onRetry={() => void activeShift.refetch()} />}
       <div className="pos-layout">
-        <div className="catalog-column">
-          <label className="search-field"><Search size={18} /><input ref={scannerRef} value={search} onKeyDown={scan} onChange={(event) => setSearch(event.target.value)} placeholder="Search products or scan a barcode…" autoFocus /><kbd>ENTER</kbd></label>
-          <div className="catalog-toolbar"><span>{productsQuery.data?.length ?? 0} ITEMS</span><span>SELECT A PRODUCT TO ADD</span></div>
+        <div className="pos-catalog">
+          <label className="pos-search"><Search size={18} /><input ref={scannerRef} value={search} onKeyDown={scan} onChange={(event) => setSearch(event.target.value)} placeholder="Scan barcode or search product..." autoFocus /><button type="button" onClick={() => scannerRef.current?.focus()}><Barcode size={16} /> Scan</button></label>
+          {search.trim() && <div className="pos-search-results">
+            {(productsQuery.data ?? []).slice(0, 8).map((product) => <button key={product.id} onClick={() => { addProduct(product); setSearch(""); }}>
+              <span><strong>{product.name}</strong><small>{product.sku} · {product.category}</small></span>
+              <b>{money(product.sellingPrice)}</b>
+            </button>)}
+            {!productsQuery.isPending && !productsQuery.data?.length && <div>No matching product.</div>}
+          </div>}
           {productsQuery.isError && <ErrorBanner message={getErrorMessage(productsQuery.error)} onRetry={() => void productsQuery.refetch()} />}
-          {productsQuery.isPending ? <div className="product-grid">{[1, 2, 3, 4, 5, 6].map((i) => <div className="product-skeleton" key={i} />)}</div>
-            : <div className="product-grid">{(productsQuery.data ?? []).map((product, index) => <button className="product-card" key={product.id} onClick={() => addProduct(product)}>
-              <div className={`product-art art-${index % 6}`}><span>{product.name.split(" ").map((word) => word[0]).slice(0, 2).join("")}</span><span className="product-category">{product.category}</span><Plus size={16} className="add-product-icon" /></div>
-              <div className="product-copy"><strong>{product.name}</strong><small>{product.sku} · {Number(product.stock).toFixed(0)} in stock</small><span>{money(product.sellingPrice)}</span></div>
-            </button>)}</div>}
-          {!productsQuery.isPending && !productsQuery.data?.length && <EmptyState title="No products found" detail="Try another name, SKU, or barcode." />}
+          <div className="pos-sale-table-wrap">
+            <table className="pos-sale-table">
+              <thead><tr><th>#</th><th>Item name</th><th>Qty</th><th>Unit price</th><th>Total</th></tr></thead>
+              <tbody>
+                {cart.map(({ product, quantity }, index) => <tr key={product.id}>
+                  <td>{index + 1}</td><td>{product.name}</td><td>{quantity}</td>
+                  <td>{money(product.sellingPrice)}</td><td>{money((cents(product.sellingPrice) * quantity + Math.round(cents(product.sellingPrice) * quantity * Number(product.taxRate) / 100)) / 100)}</td>
+                </tr>)}
+                {!cart.length && <tr className="pos-empty-row"><td colSpan={5}>Scan or search for a product to start a sale.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+          <div className="pos-actions">
+            <button onClick={() => { setCart([]); setAmountPaid(""); setCheckoutError(""); }}><Trash2 size={17} /> Clear <small>(F5)</small></button>
+            <button onClick={() => { if (cart.length) holdSaleMutation.mutate(); }} disabled={!cart.length || holdSaleMutation.isPending}><Pause size={17} /> Hold sale <small>(F6)</small></button>
+            <button onClick={() => { setHeldSalesOpen((open) => !open); void heldSalesQuery.refetch(); }}><Printer size={17} /> Retrieve <small>(F7)</small></button>
+            <button disabled><Boxes size={17} /> Open drawer <small>(F8)</small></button>
+          </div>
         </div>
         <aside className="cart-panel">
-          <div className="cart-heading"><div><div className="eyebrow">CURRENT TRANSACTION</div><h2>Your basket</h2></div><span className="cart-count">{cart.reduce((sum, item) => sum + item.quantity, 0).toString().padStart(2, "0")}</span></div>
-          <div className="cart-items">
+          <div className="cart-heading"><h2>Current Sale</h2></div>
+          <div className="pos-current-grid"><div><span>Qty</span>{cart.reduce((sum, item) => sum + item.quantity, 0)}</div><div><span>Unit price</span>{cart.length ? money(cart[0].product.sellingPrice) : "KSh 0.00"}</div><div><span>Total</span>{money(fromCents(totalCents))}</div></div>
+          <div className="pos-cart-lines">
             {cart.length ? cart.map(({ product, quantity }) => <div className="cart-item" key={product.id}>
               <div className="cart-item-info"><strong>{product.name}</strong><small>{money(product.sellingPrice)} / {product.unit}</small></div>
               <div className="quantity-stepper"><button onClick={() => adjust(product.id, -1)} aria-label={`Remove one ${product.name}`}><Minus size={13} /></button><span>{quantity}</span><button onClick={() => adjust(product.id, 1)} aria-label={`Add one ${product.name}`}><Plus size={13} /></button></div>
               <strong className="cart-line-total">{money((cents(product.sellingPrice) * quantity + Math.round(cents(product.sellingPrice) * quantity * Number(product.taxRate) / 100)) / 100)}</strong>
-            </div>) : <div className="cart-empty"><div className="empty-basket"><ShoppingBasket size={24} /></div><strong>Your basket is waiting</strong><span>Choose an item to get started.</span></div>}
+            </div>) : <div className="cart-empty"><div className="empty-basket"><ShoppingBasket size={24} /></div><strong>No items selected</strong></div>}
           </div>
-          <div className="cart-summary">
-            <div className="summary-line"><span>Items</span><span>{cart.reduce((sum, item) => sum + item.quantity, 0)}</span></div>
-            <div className="summary-line"><span>Tax included</span><span>{money(cart.reduce((sum, item) => sum + Math.round(cents(item.product.sellingPrice) * item.quantity * Number(item.product.taxRate) / 100), 0) / 100)}</span></div>
-            <div className="summary-total"><span>Total due</span><strong>{money(fromCents(totalCents))}</strong></div>
-            <div className="payment-method"><Wallet size={16} /><span>Cash payment</span><span className="payment-ready">READY</span></div>
-            <button className="button button-dark checkout-button" disabled={!canSell || !cart.length || checkout.isPending || !activeShift.data} onClick={() => checkout.mutate()}>
-              {checkout.isPending ? "Processing securely…" : "Complete cash sale"} <ArrowUpRight size={17} />
-            </button>
+          {heldSalesOpen && <div className="pos-held-sales"><div className="pos-held-heading"><strong>Held sales</strong><button onClick={() => setHeldSalesOpen(false)}>×</button></div>
+            {heldSalesQuery.isPending ? <span>Loading…</span> : heldSalesQuery.data?.length ? heldSalesQuery.data.map((sale) => <button key={sale.id} onClick={() => retrieveHeldSaleMutation.mutate(sale.id)}>
+              <span><strong>{sale.holdNumber}</strong><small>{sale.items.length} line(s)</small></span><b>Retrieve</b>
+            </button>) : <span>No held sales.</span>}
+          </div>}
+          <div className="cart-summary pos-cart-summary">
+            <div className="pos-summary-row"><span>Subtotal:</span><strong>{money(subtotalCents / 100)}</strong></div>
+            <div className="pos-summary-row"><span>Discount (%):</span><label><input value={discountPercent} onChange={(event) => setDiscountPercent(event.target.value)} inputMode="decimal" /><b>%</b></label><strong>{money(discountAmountCents / 100)}</strong></div>
+            <div className="pos-summary-row"><span>Tax:</span><strong>{money(taxCents / 100)}</strong></div>
+            <div className="pos-summary-row"><span>Amount payable:</span><strong>{money(payableCents / 100)}</strong></div>
+            <div className="pos-summary-row"><span>Amount paid:</span><label><input value={amountPaid} onChange={(event) => setAmountPaid(event.target.value)} inputMode="decimal" placeholder="0.00" /></label><strong>{money(amountPaidCents / 100)}</strong></div>
+            <div className="pos-summary-row"><span>{changeCents > 0 ? "Change due:" : "Balance:"}</span><strong>{money((changeCents > 0 ? changeCents : balanceCents) / 100)}</strong></div>
+            <div className="pos-grand-total"><span>Grand Total:</span><strong>{money(payableCents / 100)}</strong></div>
+            <div className="pos-pay-actions">
+              <button className="pos-pay-button" disabled={!canSell || !cart.length || checkout.isPending || !activeShift.data} onClick={() => checkout.mutate()}><CreditCard size={20} /><span>{checkout.isPending ? "Processing..." : "Pay Now"}<small>(F9)</small></span></button>
+              <button className="pos-cancel-button" onClick={() => setCart([])}><X size={20} /><span>Cancel<small>(Esc)</small></span></button>
+            </div>
             {!canSell ? <div className="checkout-footnote">Your role does not have permission to complete sales.</div>
               : activeShift.isError ? <div className="checkout-footnote">Shift availability could not be checked.</div>
                 : activeShift.isPending ? <div className="checkout-footnote">Checking cashier shift…</div>
@@ -1084,7 +1333,7 @@ function PosPage({ user }: { user: User }) {
           </div>
         </aside>
       </div>
-      <div className="pos-bottomline"><span><Barcode size={15} /> USB &amp; Bluetooth barcode scanners supported</span><span><CreditCard size={15} /> Online payment providers are not connected yet</span></div>
+      <footer className="pos-statusbar"><span><i /> Ready for new sale...</span><time>{new Date().toLocaleString("en-KE")}</time><b>● Connected</b></footer>
     </section>
   );
 }

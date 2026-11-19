@@ -98,6 +98,12 @@ Passwords must be at least 12 characters and are hashed before storage. Managers
 - `GET /inventory?search=milk` — branch balances and recent stock movements.
 - `POST /inventory/adjustments` — admin, manager, or inventory manager.
 - `GET /inventory/expiry?days=90` — batches already expired or due to expire within 1–365 days; defaults to 90.
+- `GET /inventory/transfer-branches` — destination branches other than the user's assigned branch.
+- `GET /inventory/transfers` — recent transfers where the user's branch is sender or receiver.
+- `POST /inventory/transfers` — create a draft transfer from the user's branch.
+- `GET /inventory/transfers/:id` — inspect a transfer visible to its source or destination branch.
+- `POST /inventory/transfers/:id/dispatch` — deduct stock from the source branch and move the transfer into transit.
+- `POST /inventory/transfers/:id/receive` — receive items into the destination branch; lower quantities are recorded as discrepancies.
 - `GET /inventory/stock-takes` — recent branch stock counts.
 - `POST /inventory/stock-takes` — start a full branch count of active products with the current system quantities.
 - `GET /inventory/stock-takes/:id` — read a branch stock count and its product list.
@@ -119,6 +125,8 @@ Stock-in adjustments and purchase receipts can include `batchCode` and `expiryDa
 ```
 
 Batch metadata is optional for non-perishable goods. The inventory screen highlights expired and near-expiry stock and supports full physical counts. A stock count posts only differences as `stock_take` movements and records the count/audit result.
+
+Transfers are branch-scoped and require an admin, manager, or inventory manager. Dispatch consumes source inventory and records batch, expiry, and cost snapshots; receipt recreates those lots at the destination. The receiving branch must report one quantity per item, not exceeding the dispatched amount. Any shortage is recorded on the transfer and in its audit log. Transfers cannot be edited or cancelled after dispatch.
 
 ## Suppliers and purchasing
 
@@ -206,6 +214,9 @@ Expense payment method is descriptive bookkeeping only; this endpoint does not i
 
 - `GET /sales` — recent branch receipts.
 - `GET /sales/:id` — receipt and item details.
+- `GET /sales/held` — held sales for the authenticated cashier.
+- `POST /sales/held` — hold the current cart for later retrieval.
+- `POST /sales/held/:id/retrieve` — retrieve and remove a cashier's held sale.
 - `GET /refunds` — recent cash refunds.
 - `POST /sales/:id/refunds` — admin or manager; records a cash refund and restores returned stock in one transaction.
 

@@ -88,6 +88,27 @@ export const stockTakeCompletionSchema = z.object({
       }
     }),
 }).strict();
+export const inventoryTransferSchema = z.object({
+  destinationBranchId: z.number().int().positive(),
+  notes: z.string().trim().max(500).optional(),
+  items: z.array(z.object({ productId: z.number().int().positive(), quantity }).strict()).min(1).max(100)
+    .superRefine((items, context) => {
+      if (new Set(items.map((item) => item.productId)).size !== items.length) {
+        context.addIssue({ code: "custom", message: "A product may only appear once per transfer." });
+      }
+    }),
+}).strict();
+export const inventoryTransferReceiptSchema = z.object({
+  items: z.array(z.object({
+    productId: z.number().int().positive(),
+    receivedQuantity: z.string().regex(/^\d{1,9}(\.\d{1,3})?$/),
+  }).strict()).min(1).max(100)
+    .superRefine((items, context) => {
+      if (new Set(items.map((item) => item.productId)).size !== items.length) {
+        context.addIssue({ code: "custom", message: "Each transfer product may only be received once." });
+      }
+    }),
+}).strict();
 
 export const customerSchema = z.object({
   name: z.string().trim().min(2).max(180),
@@ -227,7 +248,10 @@ export async function getStockMovements(branchId: number) {
 }
 
 type BatchOptions = { batchCode?: string | null; expiryDate?: string | null; unitCost?: string | null };
-type BatchRow = RowDataPacket & { id: number; quantity_remaining: string; expiry_date: string | null };
+type BatchRow = RowDataPacket & {
+  id: number; quantity_remaining: string; expiry_date: string | null;
+  batch_code?: string | null; unit_cost?: string | null;
+};
 
 async function addInventoryBatch(
   connection: PoolConnection,
@@ -256,7 +280,7 @@ async function consumeInventoryBatches(
   includeExpired: boolean,
 ) {
   const [batches] = await connection.execute<BatchRow[]>(
-    `SELECT id, quantity_remaining, DATE_FORMAT(expiry_date, '%Y-%m-%d') AS expiry_date
+    `SELECT id, quantity_remaining, batch_code, DATE_FORMAT(expiry_date, '%Y-%m-%d') AS expiry_date, unit_cost
      FROM inventory_batches
      WHERE branch_id = ? AND product_id = ? AND quantity_remaining > 0
      ORDER BY expiry_date IS NULL, expiry_date, id
@@ -271,7 +295,10 @@ async function consumeInventoryBatches(
     throw new HttpError(409, `Only ${available.toFixed(3)} unexpired batch units are available.`);
   }
   let remaining = quantityToRemove;
-  const consumed: Array<{ batchId: number; quantity: Decimal }> = [];
+  const consumed: Array<{
+    batchId: number; quantity: Decimal; batchCode: string | null;
+    expiryDate: string | null; unitCost: string | null;
+  }> = [];
   for (const batch of usable) {
     if (remaining.isZero()) break;
     const take = Decimal.min(remaining, new Decimal(batch.quantity_remaining));
@@ -280,7 +307,10 @@ async function consumeInventoryBatches(
       "UPDATE inventory_batches SET quantity_remaining = quantity_remaining - ? WHERE id = ?",
       [take.toFixed(3), batch.id],
     );
-    consumed.push({ batchId: batch.id, quantity: take });
+    consumed.push({
+      batchId: batch.id, quantity: take, batchCode: batch.batch_code ?? null,
+      expiryDate: batch.expiry_date, unitCost: batch.unit_cost ?? null,
+    });
     remaining = remaining.minus(take);
   }
   return consumed;
@@ -470,6 +500,276 @@ export async function completeStockTake(
       reference: take.reference, productsCounted: items.length, changed,
     });
     return { id, status: "completed", productsCounted: items.length, changed };
+  });
+}
+
+export async function listTransferBranches(branchId: number) {
+  return query<Array<{ id: number; name: string; code: string } & RowDataPacket>>(
+    "SELECT id, name, code FROM branches WHERE id <> ? ORDER BY name",
+    [branchId],
+  );
+}
+
+export async function listInventoryTransfers(branchId: number) {
+  return query<Array<{
+    id: number; reference: string; source_branch_id: number; source_branch: string;
+    destination_branch_id: number; destination_branch: string; status: string; notes: string | null;
+    created_at: Date; dispatched_at: Date | null; received_at: Date | null;
+    total_items: number; quantity_dispatched: string | null; quantity_received: string | null;
+  } & RowDataPacket>>(
+    `SELECT t.id, t.reference, t.source_branch_id, source.name AS source_branch,
+            t.destination_branch_id, destination.name AS destination_branch, t.status, t.notes,
+            t.created_at, t.dispatched_at, t.received_at, COUNT(i.id) AS total_items,
+            SUM(i.quantity_dispatched) AS quantity_dispatched, SUM(i.quantity_received) AS quantity_received
+     FROM inventory_transfers t
+     JOIN branches source ON source.id = t.source_branch_id
+     JOIN branches destination ON destination.id = t.destination_branch_id
+     LEFT JOIN inventory_transfer_items i ON i.transfer_id = t.id
+     WHERE t.source_branch_id = ? OR t.destination_branch_id = ?
+     GROUP BY t.id ORDER BY t.created_at DESC LIMIT 100`,
+    [branchId, branchId],
+  );
+}
+
+export async function getInventoryTransfer(id: number, branchId: number) {
+  const [transfers, items] = await Promise.all([
+    query<Array<{
+      id: number; reference: string; source_branch_id: number; source_branch: string;
+      destination_branch_id: number; destination_branch: string; status: string; notes: string | null;
+      created_at: Date; dispatched_at: Date | null; received_at: Date | null;
+    } & RowDataPacket>>(
+      `SELECT t.id, t.reference, t.source_branch_id, source.name AS source_branch,
+              t.destination_branch_id, destination.name AS destination_branch, t.status, t.notes,
+              t.created_at, t.dispatched_at, t.received_at
+       FROM inventory_transfers t
+       JOIN branches source ON source.id = t.source_branch_id
+       JOIN branches destination ON destination.id = t.destination_branch_id
+       WHERE t.id = ? AND (t.source_branch_id = ? OR t.destination_branch_id = ?) LIMIT 1`,
+      [id, branchId, branchId],
+    ),
+    query<Array<{
+      product_id: number; sku: string; name: string; unit: string;
+      quantity_requested: string; quantity_dispatched: string | null;
+      quantity_received: string | null; quantity_variance: string | null;
+    } & RowDataPacket>>(
+      `SELECT i.product_id, p.sku, p.name, p.unit, i.quantity_requested, i.quantity_dispatched,
+              i.quantity_received, i.quantity_variance
+       FROM inventory_transfer_items i
+       JOIN inventory_transfers t ON t.id = i.transfer_id
+       JOIN products p ON p.id = i.product_id
+       WHERE t.id = ? AND (t.source_branch_id = ? OR t.destination_branch_id = ?)
+       ORDER BY p.name`,
+      [id, branchId, branchId],
+    ),
+  ]);
+  if (!transfers[0]) throw new HttpError(404, "Inventory transfer not found.");
+  return { ...transfers[0], items };
+}
+
+export async function createInventoryTransfer(input: z.infer<typeof inventoryTransferSchema>, user: AuthUser) {
+  return withTransaction(async (connection) => {
+    if (input.destinationBranchId === user.branchId) {
+      throw new HttpError(400, "The destination must be a different branch.");
+    }
+    const [branches] = await connection.execute<Array<RowDataPacket & { id: number }>>(
+      "SELECT id FROM branches WHERE id = ?",
+      [input.destinationBranchId],
+    );
+    if (!branches[0]) throw new HttpError(404, "Destination branch not found.");
+    const productIds = input.items.map((item) => item.productId);
+    const placeholders = productIds.map(() => "?").join(", ");
+    const [products] = await connection.execute<Array<RowDataPacket & { id: number }>>(
+      `SELECT id FROM products WHERE is_active = TRUE AND id IN (${placeholders})`,
+      productIds,
+    );
+    if (products.length !== productIds.length) throw new HttpError(404, "One or more products are unavailable.");
+
+    const reference = `TR-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${randomUUID().slice(0, 6).toUpperCase()}`;
+    const [result] = await connection.execute(
+      `INSERT INTO inventory_transfers
+         (reference, source_branch_id, destination_branch_id, notes, created_by)
+       VALUES (?, ?, ?, ?, ?)`,
+      [reference, user.branchId, input.destinationBranchId, input.notes || null, user.id],
+    );
+    const id = (result as { insertId: number }).insertId;
+    for (const item of input.items) {
+      await connection.execute(
+        "INSERT INTO inventory_transfer_items (transfer_id, product_id, quantity_requested) VALUES (?, ?, ?)",
+        [id, item.productId, item.quantity],
+      );
+    }
+    await writeAudit(connection, user.id, "inventory_transfer.created", "inventory_transfer", id, {
+      reference, sourceBranchId: user.branchId, destinationBranchId: input.destinationBranchId,
+      products: input.items.length,
+    });
+    return { id, reference, status: "draft" };
+  });
+}
+
+export async function dispatchInventoryTransfer(id: number, user: AuthUser) {
+  return withTransaction(async (connection) => {
+    const [transfers] = await connection.execute<Array<RowDataPacket & {
+      id: number; reference: string; source_branch_id: number; status: string;
+    }>>(
+      "SELECT id, reference, source_branch_id, status FROM inventory_transfers WHERE id = ? FOR UPDATE",
+      [id],
+    );
+    const transfer = transfers[0];
+    if (!transfer || transfer.source_branch_id !== user.branchId) throw new HttpError(404, "Inventory transfer not found.");
+    if (transfer.status !== "draft") throw new HttpError(409, "Only draft transfers can be dispatched.");
+    const [items] = await connection.execute<Array<RowDataPacket & {
+      id: number; product_id: number; quantity_requested: string; name: string;
+    }>>(
+      `SELECT i.id, i.product_id, i.quantity_requested, p.name
+       FROM inventory_transfer_items i JOIN products p ON p.id = i.product_id
+       WHERE i.transfer_id = ? ORDER BY i.product_id FOR UPDATE`,
+      [id],
+    );
+    for (const item of items) {
+      await connection.execute(
+        "INSERT INTO inventory (branch_id, product_id, on_hand, reserved) VALUES (?, ?, 0, 0) ON DUPLICATE KEY UPDATE product_id = VALUES(product_id)",
+        [user.branchId, item.product_id],
+      );
+      const [balances] = await connection.execute<InventoryRow[]>(
+        "SELECT product_id, on_hand, reserved FROM inventory WHERE branch_id = ? AND product_id = ? FOR UPDATE",
+        [user.branchId, item.product_id],
+      );
+      const balance = balances[0];
+      if (!balance) throw new Error("Source inventory row could not be locked.");
+      const quantityToSend = new Decimal(item.quantity_requested);
+      const available = new Decimal(balance.on_hand).minus(balance.reserved);
+      if (available.lessThan(quantityToSend)) {
+        throw new HttpError(409, `Only ${available.toFixed(3)} units are available for ${item.name}.`);
+      }
+      const allocations = await consumeInventoryBatches(connection, user.branchId, item.product_id, quantityToSend, true);
+      for (const allocation of allocations) {
+        await connection.execute(
+          `INSERT INTO inventory_transfer_batches
+             (transfer_item_id, source_batch_id, batch_code, expiry_date, unit_cost, quantity_dispatched)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            item.id, allocation.batchId, allocation.batchCode, allocation.expiryDate,
+            allocation.unitCost, allocation.quantity.toFixed(3),
+          ],
+        );
+      }
+      await connection.execute(
+        "UPDATE inventory SET on_hand = on_hand - ? WHERE branch_id = ? AND product_id = ?",
+        [quantityToSend.toFixed(3), user.branchId, item.product_id],
+      );
+      await connection.execute(
+        "UPDATE inventory_transfer_items SET quantity_dispatched = ? WHERE id = ?",
+        [quantityToSend.toFixed(3), item.id],
+      );
+      await connection.execute(
+        `INSERT INTO stock_movements (branch_id, product_id, movement_type, quantity, reference, created_by)
+         VALUES (?, ?, 'transfer', ?, ?, ?)`,
+        [user.branchId, item.product_id, quantityToSend.negated().toFixed(3), `${transfer.reference} dispatch`, user.id],
+      );
+    }
+    await connection.execute(
+      "UPDATE inventory_transfers SET status = 'in_transit', dispatched_by = ?, dispatched_at = CURRENT_TIMESTAMP WHERE id = ?",
+      [user.id, id],
+    );
+    await writeAudit(connection, user.id, "inventory_transfer.dispatched", "inventory_transfer", id, {
+      reference: transfer.reference, products: items.length,
+    });
+    return { id, status: "in_transit" };
+  });
+}
+
+export async function receiveInventoryTransfer(
+  id: number,
+  input: z.infer<typeof inventoryTransferReceiptSchema>,
+  user: AuthUser,
+) {
+  return withTransaction(async (connection) => {
+    const [transfers] = await connection.execute<Array<RowDataPacket & {
+      id: number; reference: string; destination_branch_id: number; status: string;
+    }>>(
+      "SELECT id, reference, destination_branch_id, status FROM inventory_transfers WHERE id = ? FOR UPDATE",
+      [id],
+    );
+    const transfer = transfers[0];
+    if (!transfer || transfer.destination_branch_id !== user.branchId) throw new HttpError(404, "Inventory transfer not found.");
+    if (transfer.status !== "in_transit") throw new HttpError(409, "Only in-transit transfers can be received.");
+    const [items] = await connection.execute<Array<RowDataPacket & {
+      id: number; product_id: number; quantity_dispatched: string | null; name: string;
+    }>>(
+      `SELECT i.id, i.product_id, i.quantity_dispatched, p.name
+       FROM inventory_transfer_items i JOIN products p ON p.id = i.product_id
+       WHERE i.transfer_id = ? ORDER BY i.product_id FOR UPDATE`,
+      [id],
+    );
+    if (items.length !== input.items.length
+      || items.some((item) => !input.items.some((received) => received.productId === item.product_id))) {
+      throw new HttpError(400, "Provide one received quantity for every product in the transfer.");
+    }
+    const quantityByProduct = new Map(input.items.map((item) => [item.productId, new Decimal(item.receivedQuantity)]));
+    const discrepancies: Array<{ productId: number; sent: string; received: string; variance: string }> = [];
+    for (const item of items) {
+      const sent = item.quantity_dispatched ? new Decimal(item.quantity_dispatched) : new Decimal(0);
+      const received = quantityByProduct.get(item.product_id)!;
+      if (received.greaterThan(sent)) {
+        throw new HttpError(400, `Received quantity cannot exceed the dispatched quantity for ${item.name}.`);
+      }
+      const variance = received.minus(sent);
+      if (!variance.isZero()) {
+        discrepancies.push({
+          productId: item.product_id, sent: sent.toFixed(3),
+          received: received.toFixed(3), variance: variance.toFixed(3),
+        });
+      }
+      const [allocations] = await connection.execute<Array<RowDataPacket & {
+        batch_code: string | null; expiry_date: string | null; unit_cost: string | null; quantity_dispatched: string;
+      }>>(
+        `SELECT batch_code, DATE_FORMAT(expiry_date, '%Y-%m-%d') AS expiry_date, unit_cost, quantity_dispatched
+         FROM inventory_transfer_batches WHERE transfer_item_id = ?
+         ORDER BY expiry_date IS NULL, expiry_date, source_batch_id`,
+        [item.id],
+      );
+      if (sent.greaterThan(0) && !allocations.length) {
+        throw new Error("Dispatched transfer is missing its source batch allocations.");
+      }
+      let remaining = received;
+      for (const allocation of allocations) {
+        if (remaining.isZero()) break;
+        const quantityToReceive = Decimal.min(remaining, new Decimal(allocation.quantity_dispatched));
+        if (!quantityToReceive.greaterThan(0)) continue;
+        await addInventoryBatch(connection, user.branchId, item.product_id, quantityToReceive, {
+          batchCode: allocation.batch_code, expiryDate: allocation.expiry_date, unitCost: allocation.unit_cost,
+        });
+        remaining = remaining.minus(quantityToReceive);
+      }
+      if (remaining.greaterThan(0)) throw new Error("Received quantity exceeds the dispatched batch allocation.");
+      if (received.greaterThan(0)) {
+        await connection.execute(
+          "INSERT INTO inventory (branch_id, product_id, on_hand, reserved) VALUES (?, ?, 0, 0) ON DUPLICATE KEY UPDATE product_id = VALUES(product_id)",
+          [user.branchId, item.product_id],
+        );
+        await connection.execute(
+          "UPDATE inventory SET on_hand = on_hand + ? WHERE branch_id = ? AND product_id = ?",
+          [received.toFixed(3), user.branchId, item.product_id],
+        );
+        await connection.execute(
+          `INSERT INTO stock_movements (branch_id, product_id, movement_type, quantity, reference, created_by)
+           VALUES (?, ?, 'transfer', ?, ?, ?)`,
+          [user.branchId, item.product_id, received.toFixed(3), `${transfer.reference} receipt`, user.id],
+        );
+      }
+      await connection.execute(
+        "UPDATE inventory_transfer_items SET quantity_received = ?, quantity_variance = ? WHERE id = ?",
+        [received.toFixed(3), variance.toFixed(3), item.id],
+      );
+    }
+    await connection.execute(
+      "UPDATE inventory_transfers SET status = 'received', received_by = ?, received_at = CURRENT_TIMESTAMP WHERE id = ?",
+      [user.id, id],
+    );
+    await writeAudit(connection, user.id, "inventory_transfer.received", "inventory_transfer", id, {
+      reference: transfer.reference, products: items.length, discrepancies,
+    });
+    return { id, status: "received", discrepancies };
   });
 }
 

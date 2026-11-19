@@ -51,6 +51,19 @@ type SavedSale = {
   status: "completed" | "pending_payment";
   replayed: boolean;
 };
+export const heldSaleSchema = z.object({
+  customerId: z.number().int().positive().nullable().optional(),
+  discount: money.default("0"),
+  items: z.array(z.object({
+    productId: z.number().int().positive(),
+    quantity,
+  }).strict()).min(1).max(100)
+    .superRefine((items, context) => {
+      if (new Set(items.map((item) => item.productId)).size !== items.length) {
+        context.addIssue({ code: "custom", message: "Combine duplicate products into one cart line." });
+      }
+    }),
+}).strict();
 
 export function calculateSaleAmounts(
   items: Array<{ price: string; quantity: string; taxRate: string }>,
@@ -88,6 +101,66 @@ export function allocateSaleBatches(
     remaining = remaining.minus(quantity);
   }
   return { allocations, unallocated: remaining };
+}
+
+export async function holdSale(input: z.infer<typeof heldSaleSchema>, user: AuthUser) {
+  return withTransaction(async (connection) => {
+    const holdNumber = `HOLD-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${randomUUID().slice(0, 6).toUpperCase()}`;
+    const [result] = await connection.execute(
+      `INSERT INTO held_sales (branch_id, cashier_id, hold_number, customer_id, discount, cart)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [user.branchId, user.id, holdNumber, input.customerId ?? null, input.discount, JSON.stringify(input.items)],
+    );
+    const id = (result as { insertId: number }).insertId;
+    await connection.execute(
+      "INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, 'sale.held', 'held_sale', ?, ?)",
+      [user.id, String(id), JSON.stringify({ holdNumber, itemCount: input.items.length })],
+    );
+    return { id, holdNumber, status: "held" };
+  });
+}
+
+export async function listHeldSales(user: AuthUser) {
+  const [rows] = await pool.execute<Array<RowDataPacket & {
+    id: number; hold_number: string; discount: string; cart: string;
+    created_at: Date; cashier_name: string;
+  }>>(
+    `SELECT h.id, h.hold_number, h.discount, h.cart, h.created_at, u.name AS cashier_name
+     FROM held_sales h JOIN users u ON u.id = h.cashier_id
+     WHERE h.branch_id = ? AND h.cashier_id = ? ORDER BY h.created_at DESC LIMIT 100`,
+    [user.branchId, user.id],
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    holdNumber: row.hold_number,
+    discount: row.discount,
+    items: typeof row.cart === "string" ? JSON.parse(row.cart) : row.cart,
+    createdAt: row.created_at,
+    cashierName: row.cashier_name,
+  }));
+}
+
+export async function retrieveHeldSale(id: number, user: AuthUser) {
+  return withTransaction(async (connection) => {
+    const [rows] = await connection.execute<Array<RowDataPacket & {
+      id: number; hold_number: string; discount: string; cart: string;
+    }>>(
+      "SELECT id, hold_number, discount, cart FROM held_sales WHERE id = ? AND branch_id = ? AND cashier_id = ? FOR UPDATE",
+      [id, user.branchId, user.id],
+    );
+    if (!rows[0]) throw new HttpError(404, "Held sale not found.");
+    await connection.execute("DELETE FROM held_sales WHERE id = ?", [id]);
+    await connection.execute(
+      "INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, 'sale.retrieved', 'held_sale', ?, ?)",
+      [user.id, String(id), JSON.stringify({ holdNumber: rows[0].hold_number })],
+    );
+    return {
+      id: rows[0].id,
+      holdNumber: rows[0].hold_number,
+      discount: rows[0].discount,
+      items: typeof rows[0].cart === "string" ? JSON.parse(rows[0].cart) : rows[0].cart,
+    };
+  });
 }
 
 async function findExistingSale(connection: PoolConnection, branchId: number, key: string): Promise<SavedSale | undefined> {

@@ -7,7 +7,7 @@ import helmet from "helmet";
 import { ZodError } from "zod";
 import { authenticate, currentUser, login, logout, requireRoles } from "./auth.js";
 import { pool, query } from "./db.js";
-import { createSale, saleSchema } from "./sales.js";
+import { createSale, saleSchema, heldSaleSchema, holdSale, listHeldSales, retrieveHeldSale } from "./sales.js";
 import { HttpError } from "./errors.js";
 import {
   canAssignStaffRole, createStaff, createStaffSchema, listDepartments, listStaff,
@@ -22,7 +22,9 @@ import {
   getPurchaseOrder, getStockMovements, listInventory, listPurchaseOrders, listRefunds, listSuppliers, openShift,
   openShiftSchema, purchaseOrderSchema, receivePurchaseOrder, receiveSchema, refundSchema, adjustInventory,
   supplierSchema, completeStockTake, createStockTake, getStockTake, listExpiryBatches, listStockTakes,
-  stockTakeCompletionSchema, stockTakeSchema,
+  stockTakeCompletionSchema, stockTakeSchema, createInventoryTransfer, dispatchInventoryTransfer,
+  getInventoryTransfer, inventoryTransferReceiptSchema, inventoryTransferSchema, listInventoryTransfers,
+  listTransferBranches, receiveInventoryTransfer,
 } from "./operations.js";
 
 const app = express();
@@ -226,6 +228,79 @@ app.get("/api/inventory/expiry", authenticate, requireRoles("admin", "manager", 
       expiryDate: batch.expiry_date,
       quantity: batch.quantity_remaining, unit: batch.unit,
     })) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/inventory/transfer-branches", authenticate, requireRoles("admin", "manager", "inventory_manager"), async (req, res, next) => {
+  try {
+    const branches = await listTransferBranches(req.user!.branchId);
+    res.json({ branches });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/inventory/transfers", authenticate, requireRoles("admin", "manager", "inventory_manager"), async (req, res, next) => {
+  try {
+    const transfers = await listInventoryTransfers(req.user!.branchId);
+    res.json({ transfers: transfers.map((transfer) => ({
+      id: transfer.id, reference: transfer.reference, sourceBranchId: transfer.source_branch_id,
+      sourceBranch: transfer.source_branch, destinationBranchId: transfer.destination_branch_id,
+      destinationBranch: transfer.destination_branch, status: transfer.status, notes: transfer.notes,
+      createdAt: transfer.created_at.toISOString(), dispatchedAt: transfer.dispatched_at?.toISOString() ?? null,
+      receivedAt: transfer.received_at?.toISOString() ?? null, itemCount: Number(transfer.total_items),
+      quantityDispatched: transfer.quantity_dispatched, quantityReceived: transfer.quantity_received,
+    })) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/inventory/transfers", authenticate, requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
+  try {
+    const input = inventoryTransferSchema.parse(req.body);
+    handleOperation(() => createInventoryTransfer(input, req.user!), res, next, 201);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/inventory/transfers/:id", authenticate, requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
+  const id = positiveId(req.params.id ?? "");
+  if (!id) { res.status(400).json({ error: "Invalid transfer ID." }); return; }
+  handleOperation(async () => {
+    const transfer = await getInventoryTransfer(id, req.user!.branchId);
+    return {
+      transfer: {
+        id: transfer.id, reference: transfer.reference, sourceBranchId: transfer.source_branch_id,
+        sourceBranch: transfer.source_branch, destinationBranchId: transfer.destination_branch_id,
+        destinationBranch: transfer.destination_branch, status: transfer.status, notes: transfer.notes,
+        createdAt: transfer.created_at.toISOString(), dispatchedAt: transfer.dispatched_at?.toISOString() ?? null,
+        receivedAt: transfer.received_at?.toISOString() ?? null,
+        items: transfer.items.map((item) => ({
+          productId: item.product_id, sku: item.sku, name: item.name, unit: item.unit,
+          quantityRequested: item.quantity_requested, quantityDispatched: item.quantity_dispatched,
+          quantityReceived: item.quantity_received, quantityVariance: item.quantity_variance,
+        })),
+      },
+    };
+  }, res, next);
+});
+
+app.post("/api/inventory/transfers/:id/dispatch", authenticate, requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
+  const id = positiveId(req.params.id ?? "");
+  if (!id) { res.status(400).json({ error: "Invalid transfer ID." }); return; }
+  handleOperation(() => dispatchInventoryTransfer(id, req.user!), res, next);
+});
+
+app.post("/api/inventory/transfers/:id/receive", authenticate, requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
+  const id = positiveId(req.params.id ?? "");
+  if (!id) { res.status(400).json({ error: "Invalid transfer ID." }); return; }
+  try {
+    const input = inventoryTransferReceiptSchema.parse(req.body);
+    handleOperation(() => receiveInventoryTransfer(id, input, req.user!), res, next);
   } catch (error) {
     next(error);
   }
@@ -489,6 +564,25 @@ app.get("/api/sales", authenticate, async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+app.get("/api/sales/held", authenticate, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+  void listHeldSales(req.user!).then((sales) => res.json({ sales }), next);
+});
+
+app.post("/api/sales/held", authenticate, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+  try {
+    const input = heldSaleSchema.parse(req.body);
+    void holdSale(input, req.user!).then((sale) => res.status(201).json({ sale }), next);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/sales/held/:id/retrieve", authenticate, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+  const id = positiveId(req.params.id ?? "");
+  if (!id) { res.status(400).json({ error: "Invalid held sale ID." }); return; }
+  void retrieveHeldSale(id, req.user!).then((sale) => res.json({ sale }), next);
 });
 
 app.get("/api/sales/:id", authenticate, async (req, res, next) => {
