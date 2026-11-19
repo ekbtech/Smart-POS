@@ -157,9 +157,9 @@ export function currentUser(req: Request, res: Response): void {
 export async function posLogin(req: Request, res: Response): Promise<void> {
   const input = posLoginSchema.parse(req.body);
   const [users] = await pool.execute<Array<UserRow & {
-    pos_failed_attempts: number; pos_locked_until: Date | null;
+    pos_password_hash: string | null; pos_failed_attempts: number; pos_locked_until: Date | null;
   }>>(
-    `SELECT id, name, email, branch_id, password_hash, is_active,
+    `SELECT id, name, email, branch_id, password_hash, pos_password_hash, is_active,
             pos_failed_attempts, pos_locked_until
      FROM users WHERE pos_username = ? LIMIT 1`,
     [input.username.toLowerCase()],
@@ -182,7 +182,8 @@ export async function posLogin(req: Request, res: Response): Promise<void> {
     res.status(403).json({ error: "This account is not authorized for POS access." });
     return;
   }
-  if (!(await bcrypt.compare(input.password, user.password_hash))) {
+  const posPasswordHash = user.pos_password_hash ?? user.password_hash;
+  if (!(await bcrypt.compare(input.password, posPasswordHash))) {
     const attempts = Number(user.pos_failed_attempts ?? 0) + 1;
     if (attempts >= 5) {
       await execute(
