@@ -380,6 +380,28 @@ a { color: inherit; text-decoration: none; }
 .pos-held-strip strong { font-size: 9px; }
 .pos-held-strip span { grid-row: 2; color: #87938b; font-size: 8px; }
 .pos-held-strip b { grid-row: 1 / 3; grid-column: 2; align-self: center; color: #17633a; font-size: 9px; }
+.pos-login-page { min-height: calc(100vh - 65px); display: grid; place-items: center; padding: 24px; background: #edf2ee; }
+.pos-login-card { width: min(410px, 100%); border: 1px solid #dfe6df; border-radius: 8px; background: #fff; padding: 28px; box-shadow: 0 16px 35px rgba(27,55,36,.08); }
+.pos-login-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; }
+.pos-login-brand > div { display: grid; gap: 3px; }
+.pos-login-brand small { color: #89968d; font-size: 9px; }
+.pos-login-card h1 { margin: 0 0 7px; color: #26362d; font: 400 28px Georgia, serif; }
+.pos-login-card > p { margin: 0 0 20px; color: #7e8a81; font-size: 11px; }
+.pos-login-card form label { display: grid; gap: 7px; margin-top: 14px; color: #536158; font-size: 10px; font-weight: 700; }
+.pos-login-card form label > input { height: 43px; border: 1px solid #dde5df; border-radius: 5px; padding: 0 11px; outline: 0; }
+.pos-login-card form label small { min-height: 12px; color: #ad5144; font-size: 9px; }
+.pos-password-field { display: grid; grid-template-columns: 1fr 48px; height: 43px; border: 1px solid #dde5df; border-radius: 5px; }
+.pos-password-field input { min-width: 0; border: 0; outline: 0; padding: 0 11px; }
+.pos-password-field button { border: 0; border-left: 1px solid #edf0ed; background: #f8faf8; color: #3f704d; font-size: 9px; }
+.pos-login-error { margin: 10px 0; border: 1px solid #efcfc9; border-radius: 5px; background: #fff7f5; color: #9a4b40; padding: 9px 10px; font-size: 10px; }
+.pos-login-submit { width: 100%; height: 43px; margin-top: 10px; border: 0; border-radius: 5px; background: #17633a; color: #fff; font-size: 11px; font-weight: 700; }
+.pos-login-back { display: block; margin-top: 18px; color: #718077; font-size: 10px; text-align: center; }
+.pos-dedicated-header { height: 52px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; background: #173f2b; color: #fff; }
+.pos-dedicated-header div { display: grid; gap: 3px; }
+.pos-dedicated-header span { color: #bad0c1; font-size: 9px; }
+.pos-dedicated-header button { height: 32px; border: 1px solid rgba(255,255,255,.25); border-radius: 4px; background: transparent; color: #fff; font-size: 9px; }
+.is-pos .main-area { margin-left: 248px; }
+.is-pos .topbar { display: none; }
 
 @media (min-width: 1500px) {
   .page-content { padding-right: 55px; padding-left: 55px; }

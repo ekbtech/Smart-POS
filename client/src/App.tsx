@@ -41,7 +41,7 @@ function App() {
     <Routes>
       <Route element={<AppShell user={me.data} />}>
         <Route index element={<DashboardPage user={me.data} />} />
-        <Route path="/pos" element={<PosPage user={me.data} />} />
+        <Route path="/pos" element={<PosEntryPage user={me.data} />} />
         <Route path="/products" element={<ProductsPage user={me.data} />} />
         <Route path="/inventory" element={<InventoryPage user={me.data} />} />
         <Route path="/suppliers" element={<SuppliersPage user={me.data} />} />
@@ -1095,7 +1095,77 @@ function MetricCard({ label, value, caption, icon, tone, loading }: { label: str
   return <div className={`metric-card ${tone ?? ""}`}><div className="metric-top"><span>{label}</span><div className="metric-icon">{icon}</div></div><div className={`metric-value ${loading ? "skeleton" : ""}`}>{loading ? " " : value}</div><div className="metric-caption">{caption}</div></div>;
 }
 
-function PosPage({ user }: { user: User }) {
+function PosEntryPage({ user }: { user: User }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [message, setMessage] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<{ username?: string; password?: string }>({});
+  const [authenticated, setAuthenticated] = useState(false);
+  const [cashier, setCashier] = useState<{ id: number; name: string; username: string } | null>(null);
+  const session = useQuery({
+    queryKey: ["pos-session"],
+    queryFn: async () => (await api.get<{ cashier: { id: number; name: string; username: string } }>("/pos/session")).data.cashier,
+    retry: false,
+  });
+  useEffect(() => {
+    if (session.data) {
+      setCashier(session.data);
+      setAuthenticated(true);
+    }
+  }, [session.data]);
+  const login = useMutation({
+    mutationFn: () => api.post<{ cashier: { id: number; name: string; username: string } }>("/pos/login", { username, password }),
+    onSuccess: ({ data }) => {
+      setCashier(data.cashier);
+      setAuthenticated(true);
+      setMessage("");
+    },
+    onError: (error) => setMessage(getErrorMessage(error)),
+  });
+  const logout = useMutation({
+    mutationFn: () => api.post("/pos/logout"),
+    onSuccess: () => {
+      setAuthenticated(false);
+      setCashier(null);
+      setUsername("");
+      setPassword("");
+      setMessage("POS session closed. Sign in again to continue.");
+      window.location.assign("/pos");
+    },
+  });
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    const errors: { username?: string; password?: string } = {};
+    if (!username) errors.username = "POS username is required.";
+    else if (username.trim().length < 4) errors.username = "Username must contain at least 4 characters.";
+    if (!password) errors.password = "POS password is required.";
+    else if (password.length < 4) errors.password = "Password must contain at least 4 characters.";
+    setFieldErrors(errors);
+    if (Object.keys(errors).length === 0) login.mutate();
+  };
+  if (authenticated && cashier) {
+    return <PosPage user={user} cashier={cashier} onLogout={() => logout.mutate()} />;
+  }
+  return (
+    <main className="pos-login-page">
+      <section className="pos-login-card">
+        <div className="pos-login-brand"><span className="brand-mark">s</span><div><strong>Smart POS</strong><small>Cashier authentication</small></div></div>
+        <h1>POS access</h1>
+        <p>Sign in with an authorized cashier account to open the register.</p>
+        {message && <div className="pos-login-error" role="alert">{message}</div>}
+        <form onSubmit={submit} noValidate>
+          <label><span>POS username</span><input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" autoFocus placeholder="Enter POS username" /><small>{fieldErrors.username}</small></label>
+          <label><span>Password</span><div className="pos-password-field"><input type={showPassword ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" placeholder="Enter password" /><button type="button" onClick={() => setShowPassword((visible) => !visible)}>{showPassword ? "Hide" : "Show"}</button></div><small>{fieldErrors.password}</small></label>
+          <button className="pos-login-submit" disabled={login.isPending}>{login.isPending ? "Authenticating…" : "Open POS register"}</button>
+        </form>
+        <Link className="pos-login-back" to="/">← Back to main application</Link>
+      </section>
+    </main>
+  );
+}
+
+function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: number; name: string; username: string }; onLogout: () => void }) {
   const queryClient = useQueryClient();
   const canSell = user.roles.some((role) => ["admin", "manager", "cashier"].includes(role));
   const [search, setSearch] = useState("");
@@ -1253,6 +1323,7 @@ function PosPage({ user }: { user: User }) {
 
   return (
     <section className="pos-page pos-desktop">
+      <header className="pos-dedicated-header"><div><strong>Smart POS</strong><span>{cashier.name} · {cashier.username}</span></div><button onClick={onLogout}>Logout POS</button></header>
       {toast && <div role="status" className="success-banner"><ShieldCheck size={17} /> {toast}<button onClick={() => setToast("")} aria-label="Dismiss"><X size={15} /></button></div>}
       {checkoutError && <ErrorBanner message={checkoutError} onRetry={() => setCheckoutError("")} />}
       {activeShift.isError && <ErrorBanner message={getErrorMessage(activeShift.error)} onRetry={() => void activeShift.refetch()} />}

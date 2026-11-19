@@ -20,6 +20,14 @@ Returns the current user profile; requires a valid session cookie.
 
 Revokes the server-side session and clears the cookie.
 
+## POS authentication
+
+- `POST /pos/login` — database-backed POS cashier login. Requires a four-character minimum username and password. Five incorrect attempts temporarily lock the account for 15 minutes.
+- `GET /pos/session` — verifies the dedicated two-hour POS session. Requires the main application session and authorized cashier role.
+- `POST /pos/logout` — revokes the dedicated POS session and records a POS logout audit event.
+
+POS sales, held-sale listing, hold and retrieval require both the main authenticated session and an active dedicated POS session. A POS session is independent of the main application login and must be repeated after logout or expiry.
+
 ## Dashboard and catalogue
 
 - `GET /dashboard/summary` — today's completed sales, transaction count, active product count, low-stock items, and five recent sales for the user's branch.

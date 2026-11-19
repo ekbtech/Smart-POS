@@ -5,7 +5,9 @@ import express from "express";
 import { rateLimit } from "express-rate-limit";
 import helmet from "helmet";
 import { ZodError } from "zod";
-import { authenticate, currentUser, login, logout, requireRoles } from "./auth.js";
+import {
+  authenticate, authenticatePos, currentUser, login, logout, posLogin, posLogout, requireRoles,
+} from "./auth.js";
 import { pool, query } from "./db.js";
 import { createSale, saleSchema, heldSaleSchema, holdSale, listHeldSales, retrieveHeldSale } from "./sales.js";
 import { HttpError } from "./errors.js";
@@ -65,6 +67,11 @@ app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
 app.post("/api/auth/login", loginLimiter, (req, res, next) => void login(req, res).catch(next));
 app.post("/api/auth/logout", authenticate, (req, res, next) => void logout(req, res).catch(next));
 app.get("/api/auth/me", authenticate, currentUser);
+app.post("/api/pos/login", loginLimiter, (req, res, next) => void posLogin(req, res).catch(next));
+app.get("/api/pos/session", authenticate, authenticatePos, (req, res) => {
+  res.json({ cashier: req.posUser });
+});
+app.post("/api/pos/logout", authenticate, authenticatePos, (req, res, next) => void posLogout(req, res).catch(next));
 
 app.get("/api/staff/departments", authenticate, requireRoles("admin", "manager"), async (_req, res, next) => {
   try {
@@ -566,11 +573,11 @@ app.get("/api/sales", authenticate, async (req, res, next) => {
   }
 });
 
-app.get("/api/sales/held", authenticate, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+app.get("/api/sales/held", authenticate, authenticatePos, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
   void listHeldSales(req.user!).then((sales) => res.json({ sales }), next);
 });
 
-app.post("/api/sales/held", authenticate, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+app.post("/api/sales/held", authenticate, authenticatePos, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
   try {
     const input = heldSaleSchema.parse(req.body);
     void holdSale(input, req.user!).then((sale) => res.status(201).json({ sale }), next);
@@ -579,7 +586,7 @@ app.post("/api/sales/held", authenticate, requireRoles("admin", "manager", "cash
   }
 });
 
-app.post("/api/sales/held/:id/retrieve", authenticate, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+app.post("/api/sales/held/:id/retrieve", authenticate, authenticatePos, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid held sale ID." }); return; }
   void retrieveHeldSale(id, req.user!).then((sale) => res.json({ sale }), next);
@@ -700,7 +707,7 @@ app.get("/api/dashboard/summary", authenticate, async (req, res, next) => {
   }
 });
 
-app.post("/api/sales", authenticate, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+app.post("/api/sales", authenticate, authenticatePos, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
   const idempotencyKey = req.header("Idempotency-Key");
   if (!idempotencyKey || idempotencyKey.length > 100) {
     res.status(400).json({ error: "A valid Idempotency-Key header is required." });
