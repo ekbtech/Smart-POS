@@ -26,6 +26,12 @@ const fromCents = (value: number) => `${Math.floor(value / 100)}.${String(value 
 const greeting = new Intl.DateTimeFormat("en-KE", { weekday: "long", month: "long", day: "numeric" }).format(new Date());
 const timeGreeting = new Date().getHours() < 12 ? "Good morning" : new Date().getHours() < 17 ? "Good afternoon" : "Good evening";
 const dateInputValue = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+type PosCartLine = { lineId: number; product: Product; quantity: number };
+const aggregateCartItems = (items: PosCartLine[]) => {
+  const quantities = new Map<number, number>();
+  for (const item of items) quantities.set(item.product.id, (quantities.get(item.product.id) ?? 0) + item.quantity);
+  return Array.from(quantities, ([productId, quantity]) => ({ productId, quantity: String(quantity) }));
+};
 
 function PermissionRoute({ module, user, children }: { module: string; user: User; children: ReactNode }) {
   if (user.modules?.includes(module)) return <>{children}</>;
@@ -1198,7 +1204,8 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const queryClient = useQueryClient();
   const canSell = user.roles.some((role) => ["admin", "manager", "cashier"].includes(role));
   const [search, setSearch] = useState("");
-  const [cart, setCart] = useState<Array<{ product: Product; quantity: number; discount: number }>>([]);
+  const [cart, setCart] = useState<PosCartLine[]>([]);
+  const [saleDiscount, setSaleDiscount] = useState("0.00");
   const [toast, setToast] = useState("");
   const [checkoutError, setCheckoutError] = useState("");
   const [openingCash, setOpeningCash] = useState("0.00");
@@ -1209,10 +1216,17 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const [signOutConfirmOpen, setSignOutConfirmOpen] = useState(false);
   const [closeShiftConfirmOpen, setCloseShiftConfirmOpen] = useState(false);
   const scannerRef = useRef<HTMLInputElement>(null);
+  const saleTableRef = useRef<HTMLDivElement>(null);
+  const lineIdRef = useRef(0);
   const idempotencyRef = useRef<string | null>(null);
   useEffect(() => {
     window.requestAnimationFrame(() => scannerRef.current?.focus());
   }, []);
+  useEffect(() => {
+    if (!cart.length) return;
+    if (saleTableRef.current) saleTableRef.current.scrollTop = saleTableRef.current.scrollHeight;
+    scannerRef.current?.focus({ preventScroll: true });
+  }, [cart.length]);
   const activeShift = useQuery({
     queryKey: ["active-shift"],
     queryFn: async () => (await api.get<{ shift: { id: number; openingCash: string; openedAt: string; branchName: string } | null }>("/shifts/active")).data.shift,
@@ -1242,11 +1256,12 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   });
   const holdSaleMutation = useMutation({
     mutationFn: () => api.post("/sales/held", {
-      discount: discountAmountCents > 0 ? fromCents(discountAmountCents) : "0.00",
-      items: cart.map((item) => ({ productId: item.product.id, quantity: String(item.quantity) })),
+      discount: fromCents(discountAmountCents),
+      items: aggregateCartItems(cart),
     }),
     onSuccess: () => {
       setCart([]);
+      setSaleDiscount("0.00");
       setToast("Sale held successfully.");
       void queryClient.invalidateQueries({ queryKey: ["held-sales"] });
     },
@@ -1265,7 +1280,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     mutationFn: async () => {
       if (!idempotencyRef.current) idempotencyRef.current = crypto.randomUUID();
       const body = {
-        items: cart.map((item) => ({ productId: item.product.id, quantity: String(item.quantity) })),
+        items: aggregateCartItems(cart),
         discount: fromCents(discountAmountCents),
         payments: [{ method: "cash", amount: fromCents(payableCents) }],
       };
@@ -1276,6 +1291,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     onSuccess: (sale) => {
       setToast(`Sale ${sale.receiptNumber} completed · ${money(sale.total)}`);
       setCart([]);
+      setSaleDiscount("0.00");
       setCheckoutError("");
       idempotencyRef.current = null;
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
@@ -1291,13 +1307,14 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     } }>(`/sales/held/${id}/retrieve`),
     onSuccess: async ({ data }) => {
       const { data: catalogue } = await api.get<{ products: Product[] }>("/products");
-      const restored: Array<{ product: Product; quantity: number; discount: number }> = [];
+      const restored: PosCartLine[] = [];
       for (let index = 0; index < data.sale.items.length; index += 1) {
         const line = data.sale.items[index];
         const product = catalogue.products.find((candidate) => candidate.id === line.productId);
-        if (product) restored.push({ product, quantity: Number(line.quantity), discount: 0 });
+        if (product) restored.push({ lineId: ++lineIdRef.current, product, quantity: Number(line.quantity) });
       }
       setCart(restored);
+      setSaleDiscount(data.sale.discount);
       setToast("Held sale retrieved.");
       void queryClient.invalidateQueries({ queryKey: ["held-sales"] });
     },
@@ -1309,12 +1326,14 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       setCheckoutError(`${product.name} is out of stock.`);
       return;
     }
+    const quantityInCart = cart.reduce((sum, item) => item.product.id === product.id ? sum + item.quantity : sum, 0);
+    if (quantityInCart >= Math.floor(Number(product.stock))) {
+      setCheckoutError(`No more stock is available for ${product.name}.`);
+      return;
+    }
     setCheckoutError("");
     setCart((current) => {
-      const existing = current.find((item) => item.product.id === product.id);
-      if (existing) return current.map((item) => item.product.id === product.id
-        ? { ...item, quantity: Math.min(item.quantity + 1, Math.floor(Number(product.stock))) } : item);
-      return [...current, { product, quantity: 1, discount: 0 }];
+      return [...current, { lineId: ++lineIdRef.current, product, quantity: 1 }];
     });
   };
   const scan = async (event: KeyboardEvent<HTMLInputElement>) => {
@@ -1359,26 +1378,48 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     }
     window.requestAnimationFrame(() => scannerRef.current?.focus());
   };
-  const adjust = (productId: number, amount: number) => setCart((current) => current
-    .map((item) => item.product.id === productId
-      ? { ...item, quantity: Math.max(0, Math.min(item.quantity + amount, Math.floor(Number(item.product.stock)))) }
+  const adjust = (lineId: number, amount: number) => setCart((current) => current
+    .map((item) => item.lineId === lineId
+      ? {
+        ...item,
+        quantity: Math.max(0, Math.min(
+          item.quantity + amount,
+          Math.floor(Number(item.product.stock)) - current.reduce(
+            (sum, other) => other.product.id === item.product.id && other.lineId !== item.lineId ? sum + other.quantity : sum,
+            0,
+          ),
+        )),
+      }
       : item)
     .filter((item) => item.quantity > 0));
-  const setLineDiscount = (productId: number, discount: number) => setCart((current) =>
-    current.map((item) => item.product.id === productId
-      ? { ...item, discount: Math.min(100, Math.max(0, discount)) }
-      : item),
-  );
+  const setLineQuantity = (lineId: number, quantity: number) => setCart((current) => current.map((item) => {
+    if (item.lineId !== lineId) return item;
+    const otherQuantity = current.reduce(
+      (sum, other) => other.product.id === item.product.id && other.lineId !== item.lineId ? sum + other.quantity : sum,
+      0,
+    );
+    const maxQuantity = Math.max(1, Math.floor(Number(item.product.stock)) - otherQuantity);
+    return { ...item, quantity: Math.max(1, Math.min(Math.floor(quantity), maxQuantity)) };
+  }));
   const subtotalCents = useMemo(() => cart.reduce((sum, item) =>
     sum + cents(item.product.sellingPrice) * item.quantity, 0), [cart]);
-  const discountAmountCents = useMemo(() => cart.reduce((sum, item) =>
-    sum + Math.round(cents(item.product.sellingPrice) * item.quantity * item.discount / 100), 0), [cart]);
-  const taxCents = useMemo(() => cart.reduce((sum, item) => {
-    const gross = cents(item.product.sellingPrice) * item.quantity;
-    const taxable = gross - Math.round(gross * item.discount / 100);
-    return sum + Math.round(taxable * Number(item.product.taxRate) / 100);
-  }, 0), [cart]);
+  const discountAmountCents = Math.min(subtotalCents, Math.max(0, cents(saleDiscount)));
+  const taxCents = useMemo(() => {
+    const discountFactor = subtotalCents > 0 ? (subtotalCents - discountAmountCents) / subtotalCents : 1;
+    return cart.reduce((sum, item) => {
+      const gross = cents(item.product.sellingPrice) * item.quantity;
+      const taxable = Math.round(gross * discountFactor);
+      return sum + Math.round(taxable * Number(item.product.taxRate) / 100);
+    }, 0);
+  }, [cart, subtotalCents, discountAmountCents]);
   const payableCents = subtotalCents - discountAmountCents + taxCents;
+  const lineTotalCents = (item: PosCartLine) => {
+    const gross = cents(item.product.sellingPrice) * item.quantity;
+    const taxable = subtotalCents > 0
+      ? Math.round(gross * (subtotalCents - discountAmountCents) / subtotalCents)
+      : gross;
+    return taxable + Math.round(taxable * Number(item.product.taxRate) / 100);
+  };
   const amountPaidCents = Math.round((Number(amountPaid) || 0) * 100);
   const balanceCents = Math.max(0, payableCents - amountPaidCents);
   const changeCents = Math.max(0, amountPaidCents - payableCents);
@@ -1392,14 +1433,14 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       if (event.target instanceof HTMLInputElement) return;
       if (event.key === "F3") { event.preventDefault(); scannerRef.current?.focus(); }
       if (event.key === "F4") { event.preventDefault(); scannerRef.current?.focus(); }
-      if (event.key === "F5") { event.preventDefault(); setCart([]); setAmountPaid(""); setCheckoutError(""); }
+      if (event.key === "F5") { event.preventDefault(); setCart([]); setSaleDiscount("0.00"); setAmountPaid(""); setCheckoutError(""); }
       if (event.key === "F6") { event.preventDefault(); if (cart.length) holdSaleMutation.mutate(); }
       if (event.key === "F7") { event.preventDefault(); void heldSalesQuery.refetch(); }
       if (event.key === "F9") {
         event.preventDefault();
         if (canSell && cart.length && activeShift.data && !checkout.isPending) checkout.mutate();
       }
-      if (event.key === "Escape") { event.preventDefault(); setCart([]); }
+      if (event.key === "Escape") { event.preventDefault(); setCart([]); setSaleDiscount("0.00"); }
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
@@ -1489,12 +1530,12 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       <div className="pos-layout">
         <div className="pos-catalog">
           {productsQuery.isError && <ErrorBanner message={getErrorMessage(productsQuery.error)} onRetry={() => void productsQuery.refetch()} />}
-          <div className="pos-sale-table-wrap">
+          <div className="pos-sale-table-wrap" ref={saleTableRef}>
             <table className="pos-sale-table">
-              <thead><tr><th>No.</th><th>Product code</th><th>Product name</th><th>Qty</th><th>Unit price</th><th>Discount</th><th>Tax</th><th>Total</th><th>Action</th></tr></thead>
+              <thead><tr><th>No.</th><th>Product code</th><th>Product name</th><th>Qty</th><th>Unit price</th><th>Total</th><th>Action</th></tr></thead>
               <tbody>
                 <tr className="pos-search-row">
-                  <td className="pos-search-cell" colSpan={9}>
+                  <td className="pos-search-cell" colSpan={7}>
                     <input
                       ref={scannerRef}
                       className="pos-search-input"
@@ -1515,26 +1556,22 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
                     </div>}
                   </td>
                 </tr>
-                {cart.map(({ product, quantity, discount }, index) => <tr key={product.id}>
+                {cart.map(({ lineId, product, quantity }, index) => <tr className="pos-product-row" key={lineId}>
                   <td>{index + 1}</td><td className="pos-product-code">{product.sku}</td><td className="pos-product-name">{product.name}</td>
-                  <td><div className="pos-table-qty"><button onClick={() => adjust(product.id, -1)}>−</button><input value={quantity} onChange={(event) => {
+                  <td><div className="pos-table-qty"><button onClick={() => adjust(lineId, -1)}>−</button><input value={quantity} onChange={(event) => {
                     const next = Number(event.target.value);
-                    if (Number.isFinite(next)) setCart((current) => current.map((item) => item.product.id === product.id
-                      ? { ...item, quantity: Math.max(1, Math.min(Math.floor(next), Math.floor(Number(product.stock)))) }
-                      : item));
-                  }} /><button onClick={() => adjust(product.id, 1)}>+</button></div></td>
+                    if (Number.isFinite(next)) setLineQuantity(lineId, next);
+                  }} /><button onClick={() => adjust(lineId, 1)}>+</button></div></td>
                   <td>{money(product.sellingPrice)}</td>
-                  <td><input className="pos-line-discount" type="number" min="0" max="100" value={discount} onChange={(event) => setLineDiscount(product.id, Number(event.target.value))} /><span>%</span></td>
-                  <td>{money(Number(product.taxRate) * cents(product.sellingPrice) * quantity / 10000)}</td>
-                  <td>{money((cents(product.sellingPrice) * quantity + Math.round(cents(product.sellingPrice) * quantity * Number(product.taxRate) / 100)) / 100)}</td>
-                  <td><button className="pos-row-remove" onClick={() => setCart((current) => current.filter((item) => item.product.id !== product.id))}><X size={14} /></button></td>
+                  <td>{money(lineTotalCents({ lineId, product, quantity }) / 100)}</td>
+                  <td><button className="pos-row-remove" onClick={() => setCart((current) => current.filter((item) => item.lineId !== lineId))}><X size={14} /></button></td>
                 </tr>)}
-                {!cart.length && <tr className="pos-empty-row"><td colSpan={9}>Scan barcode, search product name, SKU or enter product code to start a sale.</td></tr>}
+                {!cart.length && <tr className="pos-empty-row"><td colSpan={7}>Scan barcode or enter a product code to start a sale.</td></tr>}
               </tbody>
             </table>
           </div>
           <div className="pos-actions">
-            <button onClick={() => { setCart([]); setAmountPaid(""); setCheckoutError(""); }}><Trash2 size={17} /> Clear <small>(F5)</small></button>
+            <button onClick={() => { setCart([]); setSaleDiscount("0.00"); setAmountPaid(""); setCheckoutError(""); }}><Trash2 size={17} /> Clear <small>(F5)</small></button>
             <button onClick={() => { if (cart.length) holdSaleMutation.mutate(); }} disabled={!cart.length || holdSaleMutation.isPending}><Pause size={17} /> Hold sale <small>(F6)</small></button>
             <button onClick={() => void heldSalesQuery.refetch()}><Printer size={17} /> Retrieve <small>(F7)</small></button>
             <button disabled><Boxes size={17} /> Open drawer <small>(F8)</small></button>
@@ -1549,7 +1586,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
           <div className="pos-payment-heading"><span>Transaction summary</span><b>{cart.reduce((sum, item) => sum + item.quantity, 0)} items</b></div>
           <div className="pos-payment-grid">
             <div><span>Subtotal</span><strong>{money(subtotalCents / 100)}</strong></div>
-            <div><span>Discount</span><strong>{money(discountAmountCents / 100)}</strong></div>
+            <div className="pos-discount-summary"><label htmlFor="sale-discount">Discount</label><input id="sale-discount" type="number" min="0" max={subtotalCents / 100} step="0.01" value={saleDiscount} onChange={(event) => setSaleDiscount(event.target.value)} onBlur={() => setSaleDiscount(fromCents(discountAmountCents))} inputMode="decimal" /></div>
             <div><span>VAT</span><strong>{money(taxCents / 100)}</strong></div>
             <div className="payable"><span>Total payable</span><strong>{money(payableCents / 100)}</strong></div>
           </div>
@@ -1562,7 +1599,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
           <div className="pos-payment-actions">
             <button className="complete" disabled={!canSell || !cart.length || checkout.isPending || !activeShift.data} onClick={() => checkout.mutate()}>{checkout.isPending ? "Processing…" : "Complete Sale"} <span>F9</span></button>
             <button className="hold" disabled={!cart.length || holdSaleMutation.isPending} onClick={() => holdSaleMutation.mutate()}>Hold Sale <span>F6</span></button>
-            <button className="cancel" onClick={() => { setCart([]); setAmountPaid(""); }}>Cancel Sale <span>Esc</span></button>
+            <button className="cancel" onClick={() => { setCart([]); setSaleDiscount("0.00"); setAmountPaid(""); }}>Cancel Sale <span>Esc</span></button>
           </div>
           {!canSell ? <div className="checkout-footnote">Your role cannot complete sales.</div>
             : activeShift.isError ? <div className="checkout-footnote">Shift availability could not be checked.</div>
