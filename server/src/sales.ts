@@ -10,6 +10,7 @@ Decimal.set({ precision: 24, rounding: Decimal.ROUND_HALF_UP });
 
 const money = z.string().regex(/^\d{1,10}(\.\d{1,2})?$/, "Enter a non-negative amount with at most two decimals.");
 const positiveMoney = money.refine((value) => new Decimal(value).greaterThan(0), "Payment amount must be greater than zero.");
+const paymentReference = z.string().trim().min(1).max(100);
 const quantity = z.string().regex(/^\d{1,9}(\.\d{1,3})?$/, "Enter a positive quantity with at most three decimals.")
   .refine((value) => new Decimal(value).greaterThan(0), "Quantity must be greater than zero.");
 
@@ -22,13 +23,122 @@ export const saleSchema = z.object({
       }
     }),
   discount: money.default("0"),
+  cashReceived: money.optional(),
   payments: z.array(z.object({
     method: z.enum(["cash", "mpesa", "card", "bank_transfer", "credit"]),
     amount: positiveMoney,
+    providerReference: paymentReference.optional(),
   }).strict()).min(1).max(5),
-}).strict();
+}).strict().superRefine((sale, context) => {
+  if (sale.cashReceived !== undefined) {
+    const allocated = sale.payments.reduce((sum, payment) => sum.plus(payment.amount), new Decimal(0));
+    if (new Decimal(sale.cashReceived).lessThan(allocated)) {
+      context.addIssue({ code: "custom", path: ["cashReceived"], message: "Amount received cannot be less than the payment total." });
+    }
+    if (new Decimal(sale.cashReceived).greaterThan(allocated)
+      && sale.payments.some((payment) => payment.method !== "cash")) {
+      context.addIssue({ code: "custom", path: ["cashReceived"], message: "Change can only be issued for cash payments." });
+    }
+  }
+  for (const payment of sale.payments) {
+    if (payment.method === "bank_transfer" && !payment.providerReference) {
+      context.addIssue({ code: "custom", path: ["payments"], message: "A bank transfer reference is required." });
+    }
+    if (payment.method !== "bank_transfer" && payment.providerReference) {
+      context.addIssue({ code: "custom", path: ["payments"], message: "Payment references are only accepted for bank transfers." });
+    }
+  }
+});
 
 type SaleInput = z.infer<typeof saleSchema>;
+export const bankTransferVerificationRequestSchema = z.object({
+  reference: paymentReference,
+  amount: positiveMoney,
+}).strict();
+export const bankTransferDecisionSchema = z.object({
+  decision: z.enum(["approved", "rejected"]),
+}).strict();
+
+export async function requestBankTransferVerification(
+  input: z.infer<typeof bankTransferVerificationRequestSchema>,
+  user: AuthUser,
+) {
+  try {
+    const [result] = await pool.execute(
+      `INSERT INTO bank_transfer_verifications (branch_id, cashier_id, reference, amount)
+       VALUES (?, ?, ?, ?)`,
+      [user.branchId, user.id, input.reference, input.amount],
+    );
+    return { id: (result as { insertId: number }).insertId, reference: input.reference, amount: input.amount, status: "pending" as const };
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ER_DUP_ENTRY") {
+      throw new HttpError(409, "This bank transfer reference has already been submitted for this branch.");
+    }
+    throw error;
+  }
+}
+
+export async function getBankTransferVerification(reference: string, user: AuthUser) {
+  const [rows] = await pool.execute<Array<RowDataPacket & {
+    id: number; amount: string; status: "pending" | "verified" | "rejected" | "used";
+  }>>(
+    `SELECT id, amount, status FROM bank_transfer_verifications
+     WHERE branch_id = ? AND cashier_id = ? AND reference = ? LIMIT 1`,
+    [user.branchId, user.id, reference],
+  );
+  if (!rows[0]) throw new HttpError(404, "Bank transfer verification request not found.");
+  return { id: rows[0].id, amount: rows[0].amount, status: rows[0].status };
+}
+
+export async function listPendingBankTransferVerifications(user: AuthUser) {
+  const [rows] = await pool.execute<Array<RowDataPacket & {
+    id: number; cashier_id: number; cashier: string; reference: string; amount: string; created_at: Date;
+  }>>(
+    `SELECT v.id, v.cashier_id, u.name AS cashier, v.reference, v.amount, v.created_at
+     FROM bank_transfer_verifications v JOIN users u ON u.id = v.cashier_id
+     WHERE v.branch_id = ? AND v.status = 'pending'
+     ORDER BY v.created_at ASC LIMIT 100`,
+    [user.branchId],
+  );
+  return rows.map((row) => ({
+    id: row.id, cashierId: row.cashier_id, cashier: row.cashier, reference: row.reference,
+    amount: row.amount, createdAt: row.created_at.toISOString(),
+  }));
+}
+
+export async function decideBankTransferVerification(
+  id: number,
+  decision: z.infer<typeof bankTransferDecisionSchema>,
+  user: AuthUser,
+) {
+  return withTransaction(async (connection) => {
+    const [rows] = await connection.execute<Array<RowDataPacket & {
+      id: number; reference: string; amount: string; status: string;
+    }>>(
+      `SELECT id, reference, amount, status FROM bank_transfer_verifications
+       WHERE id = ? AND branch_id = ? FOR UPDATE`,
+      [id, user.branchId],
+    );
+    const request = rows[0];
+    if (!request) throw new HttpError(404, "Bank transfer verification request not found.");
+    if (request.status !== "pending") throw new HttpError(409, "This transfer has already been reviewed.");
+    const status = decision.decision === "approved" ? "verified" : "rejected";
+    await connection.execute(
+      `UPDATE bank_transfer_verifications SET status = ?, reviewed_by = ?, verified_at = NOW()
+       WHERE id = ? AND status = 'pending'`,
+      [status, user.id, id],
+    );
+    await connection.execute(
+      "INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, ?, 'bank_transfer_verification', ?, ?)",
+      [
+        user.id, `bank_transfer.${status}`, String(id),
+        JSON.stringify({ reference: request.reference, amount: request.amount }),
+      ],
+    );
+    return { id, status };
+  });
+}
+
 type ProductRow = RowDataPacket & {
   id: number;
   sku: string;
@@ -178,8 +288,12 @@ async function findExistingSale(connection: PoolConnection, branchId: number, ke
 }
 
 export async function createSale(input: SaleInput, idempotencyKey: string, user: AuthUser): Promise<SavedSale> {
-  if (input.payments.some((payment) => payment.method !== "cash")) {
-    throw new HttpError(501, "Only cash checkout is enabled. Online and credit payment workflows are not connected yet.");
+  const bankTransferPayments = input.payments.filter((payment) => payment.method === "bank_transfer");
+  if (input.payments.some((payment) => payment.method !== "cash" && payment.method !== "bank_transfer")) {
+    throw new HttpError(501, "This payment method is not enabled until its provider verification workflow is configured.");
+  }
+  if (bankTransferPayments.length && input.payments.length !== 1) {
+    throw new HttpError(400, "Bank transfer cannot be split with another payment method.");
   }
 
   try {
@@ -265,15 +379,46 @@ export async function createSale(input: SaleInput, idempotencyKey: string, user:
         new Decimal(0),
       ).toDecimalPlaces(2);
       if (!paymentTotal.equals(total)) throw new HttpError(400, `Payments must equal the total of KES ${total.toFixed(2)}.`);
+      let bankTransferVerificationId: number | null = null;
+      const bankTransfer = bankTransferPayments[0];
+      if (bankTransfer) {
+        const bankReference = bankTransfer.providerReference;
+        if (!bankReference) throw new HttpError(400, "A bank transfer reference is required.");
+        const [verifications] = await connection.execute<Array<RowDataPacket & {
+          id: number; amount: string; status: string;
+        }>>(
+          `SELECT id, amount, status FROM bank_transfer_verifications
+           WHERE branch_id = ? AND cashier_id = ? AND reference = ? FOR UPDATE`,
+          [user.branchId, user.id, bankReference],
+        );
+        const verification = verifications[0];
+        if (!verification || verification.status !== "verified") {
+          throw new HttpError(409, "The bank transfer must be approved by an administrator before checkout.");
+        }
+        if (!new Decimal(verification.amount).equals(new Decimal(bankTransfer.amount))) {
+          throw new HttpError(409, "The verified bank transfer amount does not match this sale.");
+        }
+        bankTransferVerificationId = verification.id;
+      }
+      const cashReceived = input.cashReceived === undefined
+        ? paymentTotal
+        : new Decimal(input.cashReceived).toDecimalPlaces(2);
+      if (cashReceived.lessThan(paymentTotal)) {
+        throw new HttpError(400, "Amount received cannot be less than the sale total.");
+      }
+      if (cashReceived.greaterThan(paymentTotal) && input.payments.some((payment) => payment.method !== "cash")) {
+        throw new HttpError(400, "Change can only be issued for cash payments.");
+      }
+      const changeDue = cashReceived.minus(paymentTotal).toDecimalPlaces(2);
 
       const receiptNumber = `SP-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${randomUUID().slice(0, 8).toUpperCase()}`;
       const [saleResult] = await connection.execute(
-        `INSERT INTO sales (branch_id, cashier_id, customer_id, shift_id, receipt_number, idempotency_key, subtotal, discount, tax, total, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sales (branch_id, cashier_id, customer_id, shift_id, receipt_number, idempotency_key, subtotal, discount, tax, total, status, cash_received, change_due)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           user.branchId, user.id, input.customerId ?? null, shiftId, receiptNumber, idempotencyKey,
           subtotal.toFixed(2), discount.toFixed(2), taxTotal.toFixed(2), total.toFixed(2),
-          "completed",
+          "completed", cashReceived.toFixed(2), changeDue.toFixed(2),
         ],
       );
       const saleId = (saleResult as { insertId: number }).insertId;
@@ -318,9 +463,19 @@ export async function createSale(input: SaleInput, idempotencyKey: string, user:
 
       for (const payment of input.payments) {
         await connection.execute(
-          "INSERT INTO sale_payments (sale_id, method, amount, status) VALUES (?, ?, ?, ?)",
-          [saleId, payment.method, payment.amount, "completed"],
+          "INSERT INTO sale_payments (sale_id, method, amount, status, provider_reference) VALUES (?, ?, ?, ?, ?)",
+          [saleId, payment.method, payment.amount, "completed", payment.providerReference ?? null],
         );
+      }
+      if (bankTransferVerificationId !== null) {
+        const [updated] = await connection.execute(
+          `UPDATE bank_transfer_verifications SET status = 'used', sale_id = ?
+           WHERE id = ? AND status = 'verified'`,
+          [saleId, bankTransferVerificationId],
+        );
+        if ((updated as { affectedRows: number }).affectedRows !== 1) {
+          throw new HttpError(409, "The bank transfer authorization was already used.");
+        }
       }
 
       await connection.execute(
@@ -329,7 +484,8 @@ export async function createSale(input: SaleInput, idempotencyKey: string, user:
       );
       return {
         id: saleId, receiptNumber, subtotal: subtotal.toFixed(2), discount: discount.toFixed(2),
-        tax: taxTotal.toFixed(2), total: total.toFixed(2), status: "completed",
+        tax: taxTotal.toFixed(2), total: total.toFixed(2), cashReceived: cashReceived.toFixed(2),
+        changeDue: changeDue.toFixed(2), status: "completed",
         replayed: false,
       };
     });

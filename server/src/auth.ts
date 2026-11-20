@@ -5,7 +5,7 @@ import type { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import type { RowDataPacket } from "mysql2/promise";
 import { z } from "zod";
-import { execute, pool, query } from "./db.js";
+import { execute, pool, query, withTransaction } from "./db.js";
 
 function getJwtSecret(): string {
   const value = process.env.JWT_SECRET;
@@ -35,7 +35,7 @@ type UserRow = RowDataPacket & {
 
 export type AuthUser = {
   id: number; name: string; email: string; branchId: number; roles: string[];
-  posUsername?: string; modules?: string[]; defaultLanding?: string;
+  posUsername?: string; modules?: string[]; defaultLanding?: string; mustChangePassword?: boolean;
 };
 declare global {
   namespace Express {
@@ -52,6 +52,10 @@ const loginSchema = z.object({
   identifier: z.string().trim().min(1).max(254),
   password: z.string().min(1).max(200),
 });
+export const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1).max(200),
+  newPassword: z.string().min(12).max(200),
+}).strict();
 export const posLoginSchema = z.object({
   username: z.string().trim().min(4).max(100),
   password: z.string().min(4).max(200),
@@ -154,11 +158,18 @@ export async function login(req: Request, res: Response): Promise<void> {
     expires: expiresAt,
     path: "/",
   });
-  const defaultLanding = user.default_landing
-    || (roleNames.includes("cashier") ? "/pos"
-      : roleNames.includes("inventory_manager") ? "/inventory"
-        : roleNames.includes("procurement_officer") ? "/purchases"
-          : roleNames.includes("accountant") ? "/reports" : "/");
+  const [availableModules] = await pool.execute<Array<RowDataPacket & {
+    id: string; route: string; sort_order: number;
+  }>>("SELECT id, route, sort_order FROM modules ORDER BY sort_order");
+  const landingByRole = roleNames.includes("cashier") ? "/pos"
+    : roleNames.includes("inventory_manager") ? "/inventory"
+      : roleNames.includes("procurement_officer") ? "/purchases"
+        : roleNames.includes("accountant") ? "/reports" : "/";
+  const defaultLanding = availableModules.find((module) =>
+    module.route === user.default_landing && moduleIds.includes(module.id))?.route
+    ?? availableModules.find((module) => module.route === landingByRole && moduleIds.includes(module.id))?.route
+    ?? availableModules.find((module) => moduleIds.includes(module.id))?.route
+    ?? null;
   res.json({
     user: {
       id: user.id, name: user.name, email: user.email, username: user.username,
@@ -225,11 +236,54 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
       modules: [...modules],
       defaultLanding: profile?.default_landing ?? undefined,
       posUsername: profile?.pos_username ?? undefined,
+      mustChangePassword: Boolean(profile?.must_change_password),
     };
     req.sessionId = claims.sid;
+    const allowedWhileChangingPassword = new Set([
+      "/api/auth/me", "/api/auth/logout", "/api/auth/change-password",
+    ]);
+    if (req.user.mustChangePassword && !allowedWhileChangingPassword.has(req.originalUrl.split("?")[0] ?? "")) {
+      res.status(403).json({ error: "Change your temporary password before continuing.", code: "PASSWORD_CHANGE_REQUIRED" });
+      return;
+    }
     next();
   } catch (error) {
     next(error);
+  }
+
+  export async function changePassword(req: Request, res: Response): Promise<void> {
+    const input = changePasswordSchema.parse(req.body);
+    const user = req.user;
+    if (!user || !req.sessionId) {
+      res.status(401).json({ error: "Authentication required." });
+      return;
+    }
+    if (input.currentPassword === input.newPassword) {
+      res.status(400).json({ error: "Choose a new password different from your current password." });
+      return;
+    }
+    const [users] = await pool.execute<Array<RowDataPacket & {
+      password_hash: string; pos_password_hash: string | null;
+    }>>("SELECT password_hash, pos_password_hash FROM users WHERE id=? LIMIT 1", [user.id]);
+    if (!users[0] || !(await bcrypt.compare(input.currentPassword, users[0].password_hash))) {
+      res.status(400).json({ error: "Current password is incorrect." });
+      return;
+    }
+    const passwordHash = await bcrypt.hash(input.newPassword, 12);
+    await withTransaction(async (connection) => {
+      await connection.execute(
+        "UPDATE users SET password_hash=?, pos_password_hash=?, must_change_password=FALSE, main_failed_attempts=0, main_locked_until=NULL WHERE id=?",
+        [passwordHash, passwordHash, user.id],
+      );
+      await connection.execute("DELETE FROM auth_sessions WHERE user_id=? AND id<>?", [user.id, req.sessionId]);
+      await connection.execute("DELETE FROM pos_sessions WHERE user_id=?", [user.id]);
+      await connection.execute(
+        "INSERT INTO audit_logs (user_id, action, entity_type, entity_id) VALUES (?, 'auth.password_changed', 'user', ?)",
+        [user.id, String(user.id)],
+      );
+    });
+    user.mustChangePassword = false;
+    res.json({ changed: true });
   }
 }
 
@@ -295,6 +349,25 @@ export async function posLogin(req: Request, res: Response): Promise<void> {
   const roleNames = roles.map((role) => role.name);
   if (!roleNames.some((role) => ["admin", "manager", "cashier"].includes(role))) {
     res.status(403).json({ error: "This account is not authorized for POS access." });
+    return;
+  }
+  const [rolePermissions] = await pool.execute<Array<RowDataPacket & { module_id: string }>>(
+    `SELECT DISTINCT rp.module_id FROM role_permissions rp
+     JOIN user_roles ur ON ur.role_id=rp.role_id
+     WHERE ur.user_id=? AND rp.allowed=TRUE`,
+    [user.id],
+  );
+  const [userOverrides] = await pool.execute<Array<RowDataPacket & { module_id: string; allowed: number }>>(
+    "SELECT module_id, allowed FROM user_permissions WHERE user_id=?",
+    [user.id],
+  );
+  const modules = new Set(rolePermissions.map((row) => row.module_id));
+  for (const override of userOverrides) {
+    if (override.allowed) modules.add(override.module_id);
+    else modules.delete(override.module_id);
+  }
+  if (!modules.has("pos")) {
+    res.status(403).json({ error: "This account does not have permission to access POS." });
     return;
   }
   const posPasswordHash = user.pos_password_hash ?? user.password_hash;

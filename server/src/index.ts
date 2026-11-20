@@ -6,14 +6,19 @@ import { rateLimit } from "express-rate-limit";
 import helmet from "helmet";
 import { ZodError } from "zod";
 import {
-  authenticate, authenticatePos, currentUser, login, logout, posLogin, posLogout, requireRoles, requireModule,
+  authenticate, authenticatePos, changePassword, currentUser, login, logout, posLogin, posLogout, requireRoles, requireModule,
 } from "./auth.js";
 import { pool, query } from "./db.js";
-import { createSale, saleSchema, heldSaleSchema, holdSale, listHeldSales, retrieveHeldSale } from "./sales.js";
+import {
+  bankTransferDecisionSchema, bankTransferVerificationRequestSchema, createSale, decideBankTransferVerification,
+  getBankTransferVerification, listPendingBankTransferVerifications, saleSchema, heldSaleSchema,
+  holdSale, listHeldSales, requestBankTransferVerification, retrieveHeldSale,
+} from "./sales.js";
 import { HttpError } from "./errors.js";
 import {
-  canAssignStaffRole, createStaff, createStaffSchema, listDepartments, listStaff,
-  setStaffStatus, staffStatusSchema,
+  canAssignStaffRole, createStaff, createStaffSchema, listBranches, listDepartments, listRolePermissions,
+  listStaff, listStaffActivity, modulePermissionsSchema, resetStaffPassword, resetStaffPasswordSchema,
+  setStaffStatus, staffStatusSchema, updateRolePermissions, updateStaff, updateStaffSchema,
 } from "./staff.js";
 import { productSchema, registerProduct, updateProduct, updateProductSchema } from "./products.js";
 import { getBranchReport, parseReportRange } from "./reports.js";
@@ -118,6 +123,7 @@ app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
 app.post("/api/auth/login", loginLimiter, (req, res, next) => void login(req, res).catch(next));
 app.post("/api/auth/logout", authenticate, (req, res, next) => void logout(req, res).catch(next));
 app.get("/api/auth/me", authenticate, currentUser);
+app.post("/api/auth/change-password", authenticate, (req, res, next) => void changePassword(req, res).catch(next));
 app.post("/api/pos/login", loginLimiter, (req, res, next) => void posLogin(req, res).catch(next));
 app.get("/api/pos/session", authenticate, authenticatePos, (req, res) => {
   res.json({ cashier: { ...req.posUser, username: req.posUser?.posUsername } });
@@ -136,13 +142,39 @@ app.get("/api/access/modules", authenticate, requireRoles("admin"), async (_req,
   }
 });
 
+app.get("/api/access/roles", authenticate, requireRoles("admin"), async (_req, res, next) => {
+  try {
+    res.json({ roles: await listRolePermissions() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/access/roles/:role", authenticate, requireRoles("admin"), (req, res, next) => {
+  const permissions = modulePermissionsSchema.safeParse(req.body.permissions);
+  if (!permissions.success) { res.status(400).json({ error: "Provide valid role module permissions." }); return; }
+  void updateRolePermissions(req.params.role ?? "", permissions.data, req.user!).then(
+    (result) => res.json(result),
+    next,
+  );
+});
+
+app.get("/api/staff/branches", authenticate, requireRoles("admin"), async (_req, res, next) => {
+  try {
+    const branches = await listBranches();
+    res.json({ branches: branches.map(({ id, name, code }) => ({ id, name, code })) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/access/users/:id", authenticate, requireRoles("admin"), async (req, res, next) => {
   const id = positiveId(req.params.id);
   if (!id) { res.status(400).json({ error: "Invalid user ID." }); return; }
   try {
     const [users, overrides] = await Promise.all([
-      query<Array<{ id: number; default_landing: string | null } & import("mysql2").RowDataPacket>>(
-        "SELECT id, default_landing FROM users WHERE id=? LIMIT 1",
+      query<Array<{ id: number; default_landing: string | null; branch_id: number; username: string; email: string; name: string; is_active: number } & import("mysql2").RowDataPacket>>(
+        "SELECT id, name, email, username, branch_id, is_active, default_landing FROM users WHERE id=? LIMIT 1",
         [id],
       ),
       query<Array<{ module_id: string; allowed: number } & import("mysql2").RowDataPacket>>(
@@ -151,7 +183,18 @@ app.get("/api/access/users/:id", authenticate, requireRoles("admin"), async (req
       ),
     ]);
     if (!users[0]) { res.status(404).json({ error: "User not found." }); return; }
-    res.json({ defaultLanding: users[0].default_landing, permissions: overrides.map((item) => ({ moduleId: item.module_id, allowed: Boolean(item.allowed) })) });
+    const [roles] = await query<Array<{ name: string } & import("mysql2").RowDataPacket>>(
+      "SELECT r.name FROM roles r JOIN user_roles ur ON ur.role_id=r.id WHERE ur.user_id=?",
+      [id],
+    );
+    res.json({
+      user: {
+        id: users[0].id, name: users[0].name, email: users[0].email, username: users[0].username,
+        branchId: users[0].branch_id, isActive: Boolean(users[0].is_active), roles: roles.map((role) => role.name),
+      },
+      defaultLanding: users[0].default_landing,
+      permissions: overrides.map((item) => ({ moduleId: item.module_id, allowed: Boolean(item.allowed) })),
+    });
   } catch (error) {
     next(error);
   }
@@ -160,41 +203,23 @@ app.get("/api/access/users/:id", authenticate, requireRoles("admin"), async (req
 app.put("/api/access/users/:id", authenticate, requireRoles("admin"), async (req, res, next) => {
   const id = positiveId(req.params.id);
   if (!id) { res.status(400).json({ error: "Invalid user ID." }); return; }
-  const defaultLanding = typeof req.body.defaultLanding === "string" ? req.body.defaultLanding.trim().slice(0, 80) : null;
-  const permissions = Array.isArray(req.body.permissions) ? req.body.permissions : null;
-  if (!permissions || !permissions.every((item: unknown) =>
-    typeof item === "object" && item !== null
-      && typeof (item as { moduleId?: unknown }).moduleId === "string"
-      && typeof (item as { allowed?: unknown }).allowed === "boolean")) {
-    res.status(400).json({ error: "Provide module permission overrides." });
+  const defaultLanding = req.body.defaultLanding === null
+    ? null
+    : typeof req.body.defaultLanding === "string" ? req.body.defaultLanding : undefined;
+  const permissions = modulePermissionsSchema.safeParse(req.body.permissions);
+  if (defaultLanding === undefined || !permissions.success) {
+    res.status(400).json({ error: "Provide a default landing page and valid module permission overrides." });
     return;
   }
   try {
-    await pool.execute("UPDATE users SET default_landing=? WHERE id=?", [defaultLanding, id]);
-    await pool.execute("DELETE FROM user_permissions WHERE user_id=?", [id]);
-    for (const item of permissions as Array<{ moduleId: string; allowed: boolean }>) {
-      const [modules] = await pool.execute<Array<import("mysql2").RowDataPacket & { id: string }>>(
-        "SELECT id FROM modules WHERE id=? LIMIT 1",
-        [item.moduleId],
-      );
-      if (modules[0]) {
-        await pool.execute(
-          "INSERT INTO user_permissions (user_id,module_id,allowed) VALUES (?,?,?)",
-          [id, item.moduleId, item.allowed],
-        );
-      }
-    }
-    await pool.execute(
-      "INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, 'permissions.updated', 'user', ?, ?)",
-      [req.user!.id, String(id), JSON.stringify({ defaultLanding, permissions })],
-    );
-    res.json({ updated: true });
+    const result = await updateStaff(id, { defaultLanding, modulePermissions: permissions.data }, req.user!);
+    res.json(result);
   } catch (error) {
     next(error);
   }
 });
 
-app.get("/api/staff/departments", authenticate, requireRoles("admin", "manager"), async (_req, res, next) => {
+app.get("/api/staff/departments", authenticate, requireRoles("admin"), async (_req, res, next) => {
   try {
     res.json({ departments: await listDepartments() });
   } catch (error) {
@@ -202,10 +227,12 @@ app.get("/api/staff/departments", authenticate, requireRoles("admin", "manager")
   }
 });
 
-app.get("/api/staff", authenticate, requireModule("employees"), requireRoles("admin", "manager"), async (req, res, next) => {
+app.get("/api/staff", authenticate, requireRoles("admin"), async (req, res, next) => {
   try {
     const search = typeof req.query.search === "string" ? req.query.search.trim().slice(0, 100) : "";
-    const users = await listStaff(req.user!.branchId, search);
+    const branchId = positiveQueryInteger(req.query.branchId, req.user!.branchId, Number.MAX_SAFE_INTEGER);
+    if (!branchId) { res.status(400).json({ error: "Invalid branch ID." }); return; }
+    const users = await listStaff(branchId, search);
     res.json({ staff: users.map((user) => ({
       id: user.id,
       name: user.name,
@@ -220,14 +247,22 @@ app.get("/api/staff", authenticate, requireModule("employees"), requireRoles("ad
       lastLogin: user.last_login?.toISOString() ?? null,
       username: user.username,
       defaultLanding: user.default_landing,
-      permissions: user.permissions ? user.permissions.split(",").filter(Boolean) : [],
+      branchId: user.branch_id,
+      branch: user.branch_name,
+      employeeNumber: user.employee_number,
+      permissionOverrides: user.permission_overrides
+        ? user.permission_overrides.split(",").map((entry) => {
+          const [moduleId, allowed] = entry.split(":");
+          return { moduleId, allowed: allowed === "1" };
+        })
+        : [],
     })) });
   } catch (error) {
     next(error);
   }
 });
 
-app.post("/api/staff", authenticate, requireModule("employees"), requireRoles("admin", "manager"), (req, res, next) => {
+app.post("/api/staff", authenticate, requireRoles("admin"), (req, res, next) => {
   try {
     const input = createStaffSchema.parse(req.body);
     if (!canAssignStaffRole(req.user!, input.role)) {
@@ -252,6 +287,43 @@ app.patch("/api/staff/:id/status", authenticate, requireRoles("admin"), (req, re
       (staff) => res.json({ staff }),
       next,
     );
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/staff/:id", authenticate, requireRoles("admin"), (req, res, next) => {
+  const id = positiveId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid staff account ID." }); return; }
+  try {
+    const input = updateStaffSchema.parse(req.body);
+    void updateStaff(id, input, req.user!).then((staff) => res.json({ staff }), next);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/staff/:id/password-reset", authenticate, requireRoles("admin"), (req, res, next) => {
+  const id = positiveId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid staff account ID." }); return; }
+  try {
+    const input = resetStaffPasswordSchema.parse(req.body);
+    void resetStaffPassword(id, input.password, req.user!).then((result) => res.json(result), next);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/staff/:id/activity", authenticate, requireRoles("admin"), async (req, res, next) => {
+  const id = positiveId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid staff account ID." }); return; }
+  try {
+    const [users] = await pool.execute<Array<import("mysql2").RowDataPacket & { id: number }>>(
+      "SELECT id FROM users WHERE id=? LIMIT 1",
+      [id],
+    );
+    if (!users[0]) { res.status(404).json({ error: "Staff account not found." }); return; }
+    res.json(await listStaffActivity(id));
   } catch (error) {
     next(error);
   }
@@ -823,6 +895,18 @@ app.get("/api/reports/summary", authenticate, requireModule("reports"), requireR
 
 app.get("/api/sales", authenticate, requireModule("sales"), async (req, res, next) => {
   try {
+    const search = typeof req.query.q === "string" ? req.query.q.trim().slice(0, 100) : "";
+    const from = typeof req.query.from === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.from) ? req.query.from : "";
+    const to = typeof req.query.to === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.to) ? req.query.to : "";
+    const conditions = ["s.branch_id = ?"];
+    const parameters: Array<string | number> = [req.user!.branchId];
+    if (search) {
+      conditions.push("(s.receipt_number LIKE ? OR CAST(s.id AS CHAR) LIKE ? OR u.name LIKE ?)");
+      const like = `%${search}%`;
+      parameters.push(like, like, like);
+    }
+    if (from) { conditions.push("s.created_at >= ?"); parameters.push(`${from} 00:00:00`); }
+    if (to) { conditions.push("s.created_at < DATE_ADD(?, INTERVAL 1 DAY)"); parameters.push(`${to} 00:00:00`); }
     const sales = await query<Array<{
       id: number; receipt_number: string; total: string; status: string; created_at: Date; cashier: string;
       customer_name: string | null; item_count: number;
@@ -832,8 +916,8 @@ app.get("/api/sales", authenticate, requireModule("sales"), async (req, res, nex
        FROM sales s JOIN users u ON u.id = s.cashier_id
        LEFT JOIN customers c ON c.id = s.customer_id
        LEFT JOIN sale_items si ON si.sale_id = s.id
-       WHERE s.branch_id = ? GROUP BY s.id ORDER BY s.created_at DESC LIMIT 100`,
-      [req.user!.branchId],
+       WHERE ${conditions.join(" AND ")} GROUP BY s.id ORDER BY s.created_at DESC LIMIT 100`,
+      parameters,
     );
     res.json({ sales: sales.map((sale) => ({
       id: sale.id, receiptNumber: sale.receipt_number, total: sale.total, status: sale.status,
@@ -864,17 +948,56 @@ app.post("/api/sales/held/:id/retrieve", authenticate, authenticatePos, requireR
   void retrieveHeldSale(id, req.user!).then((sale) => res.json({ sale }), next);
 });
 
+app.post("/api/bank-transfer-verifications", authenticate, authenticatePos, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+  try {
+    const input = bankTransferVerificationRequestSchema.parse(req.body);
+    void requestBankTransferVerification(input, req.user!).then(
+      (verification) => res.status(201).json({ verification }),
+      next,
+    );
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/bank-transfer-verifications/status", authenticate, authenticatePos, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+  const reference = typeof req.query.reference === "string" ? req.query.reference.trim() : "";
+  if (!reference || reference.length > 100) { res.status(400).json({ error: "A valid bank transfer reference is required." }); return; }
+  void getBankTransferVerification(reference, req.user!).then((verification) => res.json({ verification }), next);
+});
+
+app.get("/api/bank-transfer-verifications", authenticate, requireRoles("admin"), (req, res, next) => {
+  void listPendingBankTransferVerifications(req.user!).then((verifications) => res.json({ verifications }), next);
+});
+
+app.post("/api/bank-transfer-verifications/:id/decision", authenticate, requireRoles("admin"), (req, res, next) => {
+  const id = positiveId(req.params.id ?? "");
+  if (!id) { res.status(400).json({ error: "Invalid bank transfer verification ID." }); return; }
+  try {
+    const decision = bankTransferDecisionSchema.parse(req.body);
+    void decideBankTransferVerification(id, decision, req.user!).then(
+      (verification) => res.json({ verification }),
+      next,
+    );
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/sales/:id", authenticate, async (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid sale ID." }); return; }
   try {
-    const [sales, items] = await Promise.all([
+    const [sales, items, payments] = await Promise.all([
       query<Array<{
-        id: number; receipt_number: string; total: string; status: string; created_at: Date;
-        cashier: string; customer_name: string | null;
+        id: number; receipt_number: string; subtotal: string; discount: string; tax: string;
+        total: string; status: string; created_at: Date; cashier: string; customer_name: string | null;
+        branch_name: string; cash_received: string | null; change_due: string;
       } & import("mysql2").RowDataPacket>>(
-        `SELECT s.id, s.receipt_number, s.total, s.status, s.created_at, u.name AS cashier, c.name AS customer_name
-         FROM sales s JOIN users u ON u.id = s.cashier_id LEFT JOIN customers c ON c.id = s.customer_id
+        `SELECT s.id, s.receipt_number, s.subtotal, s.discount, s.tax, s.total, s.status, s.created_at,
+                s.cash_received, s.change_due, u.name AS cashier, c.name AS customer_name, b.name AS branch_name
+         FROM sales s JOIN users u ON u.id = s.cashier_id JOIN branches b ON b.id = s.branch_id
+         LEFT JOIN customers c ON c.id = s.customer_id
          WHERE s.id = ? AND s.branch_id = ? LIMIT 1`,
         [id, req.user!.branchId],
       ),
@@ -887,18 +1010,30 @@ app.get("/api/sales/:id", authenticate, async (req, res, next) => {
          FROM sale_items si WHERE si.sale_id = ? ORDER BY si.id`,
         [id],
       ),
+      query<Array<{
+        method: string; amount: string; status: string; provider_reference: string | null;
+      } & import("mysql2").RowDataPacket>>(
+        "SELECT method, amount, status, provider_reference FROM sale_payments WHERE sale_id = ? ORDER BY id",
+        [id],
+      ),
     ]);
     if (!sales[0]) { res.status(404).json({ error: "Sale not found." }); return; }
     res.json({
       sale: {
-        id: sales[0].id, receiptNumber: sales[0].receipt_number, total: sales[0].total,
+        id: sales[0].id, receiptNumber: sales[0].receipt_number, subtotal: sales[0].subtotal,
+        discount: sales[0].discount, tax: sales[0].tax, total: sales[0].total,
         status: sales[0].status, createdAt: sales[0].created_at.toISOString(),
-        cashier: sales[0].cashier, customer: sales[0].customer_name,
+        cashier: sales[0].cashier, customer: sales[0].customer_name, branch: sales[0].branch_name,
+        cashReceived: sales[0].cash_received, changeDue: sales[0].change_due,
       },
       items: items.map((item) => ({
         id: item.id, productId: item.product_id, sku: item.sku_snapshot, name: item.name_snapshot,
         quantity: item.quantity, refunded: item.refunded, unitPrice: item.unit_price,
         taxRate: item.tax_rate, lineTotal: item.line_total,
+      })),
+      payments: payments.map((payment) => ({
+        method: payment.method, amount: payment.amount, status: payment.status,
+        reference: payment.provider_reference,
       })),
     });
   } catch (error) {

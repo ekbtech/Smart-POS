@@ -1,0 +1,3 @@
+ALTER TABLE sales
+  ADD COLUMN cash_received DECIMAL(12,2) NULL,
+  ADD COLUMN change_due DECIMAL(12,2) NOT NULL DEFAULT 0;

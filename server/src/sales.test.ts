@@ -32,6 +32,35 @@ describe("sale validation", () => {
     }).success).toBe(false);
   });
 
+  it("accepts cash tender above the amount applied and rejects insufficient tender", () => {
+    const sale = {
+      items: [{ productId: 3, quantity: "1" }],
+      payments: [{ method: "cash", amount: "50.00" }],
+    };
+    expect(saleSchema.safeParse({ ...sale, cashReceived: "100.00" }).success).toBe(true);
+    expect(saleSchema.safeParse({ ...sale, cashReceived: "49.99" }).success).toBe(false);
+  });
+
+  it("does not allow change for a non-cash payment", () => {
+    expect(saleSchema.safeParse({
+      items: [{ productId: 3, quantity: "1" }],
+      payments: [{ method: "mpesa", amount: "50.00" }],
+      cashReceived: "60.00",
+    }).success).toBe(false);
+  });
+
+  it("requires a reference for bank-transfer checkout", () => {
+    const sale = {
+      items: [{ productId: 3, quantity: "1" }],
+      payments: [{ method: "bank_transfer", amount: "50.00" }],
+    };
+    expect(saleSchema.safeParse(sale).success).toBe(false);
+    expect(saleSchema.safeParse({
+      ...sale,
+      payments: [{ ...sale.payments[0], providerReference: "BANK-REF-001" }],
+    }).success).toBe(true);
+  });
+
   it("does not create unconfirmed online payments before a provider is configured", async () => {
     const input = saleSchema.parse({
       items: [{ productId: 3, quantity: "1" }],

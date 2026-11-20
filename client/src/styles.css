@@ -1,5 +1,67 @@
 @import "tailwindcss";
 
+.payment-setup-note { padding: 0 12px 8px; color: #78857c; font-size: 9px; line-height: 1.4; }
+.bank-verification-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; padding: 0 12px 8px; }
+.bank-verification-actions button { min-height: 34px; border: 1px solid #cfdcd2; border-radius: 4px; background: #f5f8f5; color: #285a39; font-size: 10px; font-weight: 700; }
+.bank-verification-actions button:disabled { opacity: .5; cursor: not-allowed; }
+.bank-verification-status { margin: 0 12px 8px; border-radius: 4px; padding: 8px; background: #fff7e6; color: #785d18; font-size: 10px; line-height: 1.4; }
+.bank-verification-status.status-verified { background: #eaf5ed; color: #1c6338; }
+.bank-verification-status.status-rejected,.bank-verification-status.status-used { background: #fff0f0; color: #a53d3d; }
+.bank-review-notice { margin: 0; padding: 0 14px 12px; color: #617067; font-size: 11px; }
+.sales-search-bar { display: grid; grid-template-columns: minmax(220px, 1fr) repeat(2, minmax(140px, 190px)); gap: 10px; padding: 12px 14px; border-bottom: 1px solid #e8ece8; }
+.sales-search-bar label { display: grid; gap: 5px; color: #68756c; font-size: 10px; font-weight: 700; }
+.sales-search-bar input { min-width: 0; height: 36px; border: 1px solid #dfe5df; border-radius: 4px; padding: 0 9px; color: #26382d; font: inherit; font-weight: 400; }
+.receipt-backdrop { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; overflow: auto; background: rgb(14 26 19 / 55%); padding: 24px; }
+.receipt-dialog { width: min(100%, 620px); max-height: calc(100vh - 48px); overflow: auto; border-radius: 8px; background: #f3f5f3; box-shadow: 0 24px 80px rgb(0 0 0 / 30%); }
+.receipt-toolbar { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid #dce3dd; background: white; }
+.receipt-toolbar label { display: flex; align-items: center; gap: 7px; margin-right: auto; color: #536157; font-size: 11px; }
+.receipt-toolbar select,.receipt-toolbar button { height: 34px; border: 1px solid #dce3dd; border-radius: 4px; background: #fff; padding: 0 9px; color: #34443a; font-size: 11px; }
+.receipt-toolbar button { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.receipt-toolbar .receipt-close { border-color: #e8d2d2; color: #a53d3d; }
+.receipt-paper { margin: 20px auto; padding: 20px 17px; background: white; color: #222; font-family: Arial, sans-serif; font-size: 11px; box-shadow: 0 2px 8px rgb(0 0 0 / 10%); }
+.receipt-paper.paper-58 { width: 58mm; padding: 12px 9px; font-size: 9px; }
+.receipt-paper.paper-80 { width: 80mm; }
+.receipt-brand { display: grid; justify-items: center; gap: 5px; padding-bottom: 12px; border-bottom: 1px dashed #888; }
+.receipt-brand .brand-mark { width: 27px; height: 27px; display: grid; place-items: center; border-radius: 50%; background: #17633a; color: white; font-weight: 800; font-size: 17px; }
+.receipt-brand strong { font-size: 17px; letter-spacing: .3px; }
+.receipt-brand small { font-size: 10px; }
+.receipt-meta { display: grid; gap: 5px; padding: 11px 0; border-bottom: 1px dashed #888; }
+.receipt-meta div,.receipt-totals div,.receipt-payment div { display: flex; justify-content: space-between; gap: 8px; }
+.receipt-meta span { color: #5e5e5e; }
+.receipt-meta strong { text-align: right; }
+.receipt-items { width: 100%; margin: 10px 0; border-collapse: collapse; }
+.receipt-items th { padding: 5px 2px; border-bottom: 1px solid #888; text-align: left; }
+.receipt-items th:nth-child(2),.receipt-items td:nth-child(2) { text-align: center; }
+.receipt-items th:last-child,.receipt-items td:last-child { text-align: right; }
+.receipt-items td { padding: 6px 2px; vertical-align: top; }
+.receipt-items td:first-child strong,.receipt-items td:first-child small { display: block; }
+.receipt-items td:first-child small { margin-top: 2px; color: #666; }
+.receipt-totals { display: grid; gap: 5px; padding: 10px 0; border-top: 1px dashed #888; }
+.receipt-totals .receipt-total { margin-top: 3px; padding-top: 7px; border-top: 1px solid #555; font-size: 14px; font-weight: 700; }
+.receipt-payment { display: grid; gap: 6px; padding: 9px 0; border-top: 1px dashed #888; }
+.receipt-payment > strong { margin-bottom: 2px; }
+.receipt-payment small { width: 100%; color: #555; text-align: right; }
+.receipt-thanks { padding-top: 11px; border-top: 1px dashed #888; text-align: center; font-weight: 700; }
+.receipt-new-sale { padding: 0 16px 16px; }
+.receipt-new-sale button { width: 100%; min-height: 42px; }
+.row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+@media (max-width: 700px) {
+  .sales-search-bar { grid-template-columns: 1fr 1fr; }
+  .sales-search-bar label:first-child { grid-column: 1 / -1; }
+  .receipt-backdrop { place-items: start center; padding: 10px; }
+  .receipt-dialog { max-height: calc(100vh - 20px); }
+  .receipt-toolbar { flex-wrap: wrap; }
+}
+@media print {
+  @page { margin: 2mm; }
+  body * { visibility: hidden !important; }
+  .receipt-dialog,.receipt-dialog * { visibility: visible !important; }
+  .receipt-backdrop { position: fixed; inset: 0; display: block; overflow: visible; padding: 0; background: white; }
+  .receipt-dialog { width: auto; max-height: none; overflow: visible; margin: 0; border-radius: 0; background: white; box-shadow: none; }
+  .receipt-paper { margin: 0 auto; box-shadow: none; break-inside: avoid; }
+  .no-print { display: none !important; }
+}
+
 :root {
   font-family: "DM Sans", "Segoe UI", sans-serif;
   color: #202a23;

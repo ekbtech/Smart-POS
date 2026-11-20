@@ -75,13 +75,18 @@ Requires a valid session, same-origin request, and a unique `Idempotency-Key` he
 {
   "items": [{ "productId": 3, "quantity": "2" }],
   "discount": "0.00",
+  "cashReceived": "150.00",
   "payments": [{ "method": "cash", "amount": "136.00" }]
 }
 ```
 
 Quantities are decimal strings with up to three fractional digits. Monetary values are decimal strings with up to two fractional digits. The API recalculates totals and tax from database product records; client-submitted unit prices are not accepted. The sum of cash payment allocations must equal the calculated total. Duplicate product lines are rejected; combine quantities into one line.
 
-Checkout locks the relevant inventory rows and writes the sale, item snapshots, cash payment, stock movements, and audit event inside one database transaction. A repeated idempotency key returns the original sale. Insufficient stock returns HTTP 409. Only cash is currently enabled; card, M-PESA, bank transfer, and credit return HTTP 501 until their confirmation or authorization workflows are implemented. An initiated external payment must never be treated as paid.
+`cashReceived` is the drawer tendered amount and must be at least the calculated total; it is optional for API clients and defaults to the payment allocation total. The difference is recorded as change due. Change cannot be issued against a non-cash payment.
+
+Apply migrations `012_sale_cash_tender.sql` and `013_bank_transfer_verification.sql` before deploying this checkout/receipt update; they add persisted cash tender/change and bank-transfer authorization records.
+
+Checkout locks the relevant inventory rows and writes the sale, item snapshots, payment, stock movements, and audit event inside one database transaction. A repeated idempotency key returns the original sale. Insufficient stock returns HTTP 409. Cash is enabled. Bank transfer requires an administrator to approve a submitted reference and exact amount after independently verifying it against the bank; checkout consumes that authorization in the same transaction as the sale. M-PESA, card, credit, and split checkout remain unavailable until provider workflows are configured. An initiated or manually referenced external payment must never be treated as paid.
 
 Checkout requires an open cashier shift for the signed-in user. Start one with `POST /shifts/open` before using the POS.
 
@@ -235,11 +240,15 @@ Expense payment method is descriptive bookkeeping only; this endpoint does not i
 
 ## Sales and refunds
 
-- `GET /sales` — recent branch receipts.
-- `GET /sales/:id` — receipt and item details.
+- `GET /sales?q=...&from=YYYY-MM-DD&to=YYYY-MM-DD` — up to 100 recent branch receipts, filterable by receipt number, transaction ID, cashier name, and date range.
+- `GET /sales/:id` — branch-scoped receipt, item, totals, cashier, payment, and tender details.
 - `GET /sales/held` — held sales for the authenticated cashier.
 - `POST /sales/held` — hold the current cart for later retrieval.
 - `POST /sales/held/:id/retrieve` — retrieve and remove a cashier's held sale.
+- `POST /bank-transfer-verifications` — cashier submits a reference and sale amount for administrator review; does not complete a sale or update stock.
+- `GET /bank-transfer-verifications/status?reference=...` — cashier checks their submitted reference status.
+- `GET /bank-transfer-verifications` — admin-only list of pending transfers for the branch.
+- `POST /bank-transfer-verifications/:id/decision` — admin-only `{ "decision": "approved" }` or `{ "decision": "rejected" }`; approve only after confirming the transfer in the bank account.
 - `GET /refunds` — recent cash refunds.
 - `POST /sales/:id/refunds` — admin or manager; records a cash refund and restores returned stock in one transaction.
 
@@ -254,4 +263,4 @@ The API rejects quantities above the unrefunded quantity and prevents total refu
 
 ## Operational notes
 
-These endpoints require their corresponding database migrations to be applied. Database-backed workflows should be exercised against a configured MySQL 8 instance before production use. Provider integrations, offline synchronization, attendance tracking, inter-branch transfers, PDF exports, and invoice-generator connectivity are not currently exposed by this API.
+These endpoints require their corresponding database migrations to be applied. Database-backed workflows should be exercised against a configured MySQL 8 instance before production use. Provider integrations, offline synchronization, attendance tracking, inter-branch transfers, and invoice-generator connectivity are not currently exposed by this API. Receipt print and PDF output use the browser print dialog.

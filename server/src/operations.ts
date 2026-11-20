@@ -1119,12 +1119,13 @@ export async function getShiftCloseSummary(user: OperationUser) {
     [shiftId],
   );
   const [payments] = await query<Array<{
-    cash_sales: string; card_sales: string; mobile_sales: string;
+    cash_sales: string; card_sales: string; mobile_sales: string; bank_transfer_sales: string;
   } & RowDataPacket>>(
     `SELECT
        COALESCE(SUM(CASE WHEN sp.method = 'cash' THEN sp.amount ELSE 0 END), 0) AS cash_sales,
        COALESCE(SUM(CASE WHEN sp.method = 'card' THEN sp.amount ELSE 0 END), 0) AS card_sales,
-       COALESCE(SUM(CASE WHEN sp.method = 'mpesa' THEN sp.amount ELSE 0 END), 0) AS mobile_sales
+       COALESCE(SUM(CASE WHEN sp.method = 'mpesa' THEN sp.amount ELSE 0 END), 0) AS mobile_sales,
+       COALESCE(SUM(CASE WHEN sp.method = 'bank_transfer' THEN sp.amount ELSE 0 END), 0) AS bank_transfer_sales
      FROM sale_payments sp JOIN sales s ON s.id = sp.sale_id
      WHERE s.shift_id = ? AND s.status = 'completed' AND sp.status = 'completed'`,
     [shiftId],
@@ -1156,6 +1157,7 @@ export async function getShiftCloseSummary(user: OperationUser) {
     cashSales: payments[0]?.cash_sales ?? "0.00",
     cardSales: payments[0]?.card_sales ?? "0.00",
     mobileMoneySales: payments[0]?.mobile_sales ?? "0.00",
+    bankTransferSales: payments[0]?.bank_transfer_sales ?? "0.00",
     refunds: refunds[0]?.refunds ?? "0.00",
     transactionCount: Number(totals[0]?.transaction_count ?? 0),
     expectedCash: expected.toFixed(2),

@@ -27,6 +27,18 @@ const greeting = new Intl.DateTimeFormat("en-KE", { weekday: "long", month: "lon
 const timeGreeting = new Date().getHours() < 12 ? "Good morning" : new Date().getHours() < 17 ? "Good afternoon" : "Good evening";
 const dateInputValue = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 type PosCartLine = { lineId: number; product: Product; quantity: number };
+type SaleReceipt = {
+  sale: {
+    id: number; receiptNumber: string; subtotal: string; discount: string; tax: string;
+    total: string; status: string; createdAt: string; cashier: string; customer: string | null;
+    branch: string; cashReceived: string | null; changeDue: string;
+  };
+  items: Array<{ id: number; sku: string; name: string; quantity: string; unitPrice: string; lineTotal: string }>;
+  payments: Array<{ method: string; amount: string; status: string; reference: string | null }>;
+};
+type BankTransferVerification = {
+  id: number; amount: string; status: "pending" | "verified" | "rejected" | "used";
+};
 const aggregateCartItems = (items: PosCartLine[]) => {
   const quantities = new Map<number, number>();
   for (const item of items) quantities.set(item.product.id, (quantities.get(item.product.id) ?? 0) + item.quantity);
@@ -1274,17 +1286,76 @@ function ExpensesPage({ user }: { user: User }) {
   </section>;
 }
 
+function ReceiptDialog({
+  receipt,
+  width,
+  onWidthChange,
+  onClose,
+  onNewSale,
+}: {
+  receipt: SaleReceipt;
+  width: "58mm" | "80mm";
+  onWidthChange: (width: "58mm" | "80mm") => void;
+  onClose: () => void;
+  onNewSale?: () => void;
+}) {
+  const printReceipt = () => window.print();
+  return <div className="receipt-backdrop">
+    <section className={`receipt-dialog receipt-${width === "58mm" ? "58" : "80"}`} role="dialog" aria-modal="true" aria-label="Sale receipt">
+      <div className="receipt-toolbar no-print">
+        <label>Paper size<select value={width} onChange={(event) => onWidthChange(event.target.value as "58mm" | "80mm")}><option value="58mm">58 mm</option><option value="80mm">80 mm</option></select></label>
+        <button onClick={printReceipt}><Printer size={16} /> Print</button>
+        <button onClick={printReceipt}><Download size={16} /> Save as PDF</button>
+        <button className="receipt-close" onClick={onClose}>Close</button>
+      </div>
+      <article className={`receipt-paper paper-${width === "58mm" ? "58" : "80"}`}>
+        <header className="receipt-brand"><span className="brand-mark">s</span><strong>Smart POS</strong><small>{receipt.sale.branch}</small></header>
+        <div className="receipt-meta">
+          <div><span>RECEIPT</span><strong>{receipt.sale.receiptNumber}</strong></div>
+          <div><span>TRANSACTION</span><strong>#{receipt.sale.id}</strong></div>
+          <div><span>DATE</span><strong>{new Date(receipt.sale.createdAt).toLocaleString("en-KE")}</strong></div>
+          <div><span>CASHIER</span><strong>{receipt.sale.cashier}</strong></div>
+          {receipt.sale.customer && <div><span>CUSTOMER</span><strong>{receipt.sale.customer}</strong></div>}
+        </div>
+        <table className="receipt-items"><thead><tr><th>ITEM</th><th>QTY</th><th>TOTAL</th></tr></thead><tbody>
+          {receipt.items.map((item) => <tr key={item.id}><td><strong>{item.name}</strong><small>{item.sku} · {money(item.unitPrice)} each</small></td><td>{Number(item.quantity).toLocaleString("en-KE")}</td><td>{money(item.lineTotal)}</td></tr>)}
+        </tbody></table>
+        <div className="receipt-totals">
+          <div><span>Subtotal</span><strong>{money(receipt.sale.subtotal)}</strong></div>
+          <div><span>Discount</span><strong>-{money(receipt.sale.discount)}</strong></div>
+          <div><span>VAT / Tax</span><strong>{money(receipt.sale.tax)}</strong></div>
+          <div className="receipt-total"><span>TOTAL</span><strong>{money(receipt.sale.total)}</strong></div>
+        </div>
+        <div className="receipt-payment">
+          <strong>PAYMENT</strong>
+          {receipt.payments.map((payment, index) => <div key={`${payment.method}-${index}`}><span>{payment.method.replaceAll("_", " ").toUpperCase()}</span><strong>{money(payment.amount)}</strong>{payment.reference && <small>Ref: {payment.reference}</small>}</div>)}
+          <div><span>Amount received</span><strong>{money(receipt.sale.cashReceived ?? receipt.sale.total)}</strong></div>
+          {Number(receipt.sale.changeDue) > 0 && <div><span>Change</span><strong>{money(receipt.sale.changeDue)}</strong></div>}
+        </div>
+        <footer className="receipt-thanks">Thank you for shopping with us!</footer>
+      </article>
+      {onNewSale && <div className="receipt-new-sale no-print"><button className="button button-dark" onClick={onNewSale}>New Sale</button></div>}
+    </section>
+  </div>;
+}
+
 function SalesPage({ user }: { user: User }) {
   const query = useQueryClient();
   const canRefund = user.roles.some((role) => ["admin", "manager"].includes(role));
+  const canVerifyBankTransfer = user.roles.includes("admin");
   const [selected, setSelected] = useState<number | null>(null);
+  const [receiptSelected, setReceiptSelected] = useState<number | null>(null);
+  const [receiptWidth, setReceiptWidth] = useState<"58mm" | "80mm">("80mm");
+  const [searchText, setSearchText] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
   const [reason, setReason] = useState("");
   const [quantities, setQuantities] = useState<Record<number, string>>({});
   const [error, setError] = useState("");
-  const sales = useQuery({ queryKey: ["sales"], queryFn: async () => (await api.get<{ sales: Array<{
+  const sales = useQuery({ queryKey: ["sales", searchText, fromDate, toDate], queryFn: async () => (await api.get<{ sales: Array<{
     id: number; receiptNumber: string; total: string; status: string; createdAt: string;
     cashier: string; customer: string | null; itemCount: number;
-  }> }>("/sales")).data.sales });
+  }> }>("/sales", { params: { q: searchText, from: fromDate, to: toDate } })).data.sales });
   const refunds = useQuery({ queryKey: ["refunds"], queryFn: async () => (await api.get<{ refunds: Array<{
     id: number; refundNumber: string; receiptNumber: string; reason: string; total: string;
     createdAt: string; createdBy: string;
@@ -1293,6 +1364,24 @@ function SalesPage({ user }: { user: User }) {
     sale: { id: number; receiptNumber: string; total: string; status: string };
     items: Array<{ id: number; productId: number; sku: string; name: string; quantity: string; refunded: string; lineTotal: string }>;
   }>(`/sales/${selected}`)).data });
+  const receiptQuery = useQuery({
+    queryKey: ["sale-receipt", receiptSelected],
+    enabled: receiptSelected !== null,
+    queryFn: async () => (await api.get<SaleReceipt>(`/sales/${receiptSelected}`)).data,
+  });
+  const bankVerifications = useQuery({
+    queryKey: ["bank-transfer-verifications"],
+    enabled: canVerifyBankTransfer,
+    queryFn: async () => (await api.get<{ verifications: Array<{
+      id: number; cashierId: number; cashier: string; reference: string; amount: string; createdAt: string;
+    }> }>("/bank-transfer-verifications")).data.verifications,
+  });
+  const reviewBankTransfer = useMutation({
+    mutationFn: ({ id, decision }: { id: number; decision: "approved" | "rejected" }) =>
+      api.post(`/bank-transfer-verifications/${id}/decision`, { decision }),
+    onSuccess: () => void query.invalidateQueries({ queryKey: ["bank-transfer-verifications"] }),
+    onError: (reason) => setError(getErrorMessage(reason)),
+  });
   const refund = useMutation({
     mutationFn: () => api.post(`/sales/${selected}/refunds`, {
       reason,
@@ -1328,12 +1417,24 @@ function SalesPage({ user }: { user: User }) {
         <button className="button button-dark" disabled={refund.isPending || !Object.values(quantities).some((value) => Number(value) > 0)}>{refund.isPending ? "Processing refund…" : "Confirm cash refund"}</button>
       </form>}
     </section>}
+    {canVerifyBankTransfer && <section className="panel operation-table-panel"><div className="panel-heading"><div><div className="eyebrow">BANK SETTLEMENT REVIEW</div><h2>Pending transfer verification</h2></div></div>
+      <p className="bank-review-notice">Check each reference against the bank statement before approving it. Approval authorizes a cashier to complete a sale for this exact amount.</p>
+      {bankVerifications.isError && <ErrorBanner message={getErrorMessage(bankVerifications.error)} onRetry={() => void bankVerifications.refetch()} />}
+      <div className="product-table-wrap"><table className="product-table"><thead><tr><th>REFERENCE</th><th>CASHIER</th><th>SUBMITTED</th><th>AMOUNT</th><th>REVIEW</th></tr></thead><tbody>{bankVerifications.data?.map((transfer) => <tr key={transfer.id}><td className="sku-cell">{transfer.reference}</td><td>{transfer.cashier}</td><td>{new Date(transfer.createdAt).toLocaleString("en-KE")}</td><td className="price-cell">{money(transfer.amount)}</td><td className="row-actions"><button className="small-action" disabled={reviewBankTransfer.isPending} onClick={() => {
+        if (window.confirm(`Confirm that transfer ${transfer.reference} for ${money(transfer.amount)} is visible in the bank account?`)) {
+          reviewBankTransfer.mutate({ id: transfer.id, decision: "approved" });
+        }
+      }}>Approve verified</button><button className="small-action reject-action" disabled={reviewBankTransfer.isPending} onClick={() => reviewBankTransfer.mutate({ id: transfer.id, decision: "rejected" })}>Reject</button></td></tr>)}</tbody></table>{!bankVerifications.isPending && !bankVerifications.data?.length && <EmptyState title="No transfers awaiting review" detail="Cashiers' bank transfer verification requests will appear here." />}</div>
+    </section>}
     <section className="panel operation-table-panel"><div className="panel-heading"><div><div className="eyebrow">BRANCH RECEIPTS</div><h2>Recent sales</h2></div></div>
-      <div className="product-table-wrap"><table className="product-table"><thead><tr><th>RECEIPT</th><th>DATE</th><th>CASHIER</th><th>CUSTOMER</th><th>ITEMS</th><th>TOTAL</th><th>ACTION</th></tr></thead><tbody>{sales.data?.map((sale) => <tr key={sale.id}><td className="sku-cell">{sale.receiptNumber}</td><td>{new Date(sale.createdAt).toLocaleString("en-KE")}</td><td>{sale.cashier}</td><td>{sale.customer ?? "Walk-in"}</td><td>{sale.itemCount}</td><td className="price-cell">{money(sale.total)}</td><td>{canRefund && sale.status === "completed" && <button className="small-action" onClick={() => { setSelected(sale.id); setError(""); }}>Return</button>}</td></tr>)}</tbody></table>{!sales.isPending && !sales.data?.length && <EmptyState title="No sales yet" detail="Completed checkout receipts will appear here." />}</div>
+      <div className="sales-search-bar"><label>Search receipts, transaction ID or cashier<input value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="Receipt number, ID, cashier" /></label><label>From<input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label><label>To<input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label></div>
+      <div className="product-table-wrap"><table className="product-table"><thead><tr><th>RECEIPT</th><th>DATE</th><th>CASHIER</th><th>CUSTOMER</th><th>ITEMS</th><th>TOTAL</th><th>ACTION</th></tr></thead><tbody>{sales.data?.map((sale) => <tr key={sale.id}><td className="sku-cell">{sale.receiptNumber}</td><td>{new Date(sale.createdAt).toLocaleString("en-KE")}</td><td>{sale.cashier}</td><td>{sale.customer ?? "Walk-in"}</td><td>{sale.itemCount}</td><td className="price-cell">{money(sale.total)}</td><td className="row-actions"><button className="small-action" onClick={() => { setReceiptSelected(sale.id); setError(""); }}>View / Reprint</button>{canRefund && sale.status === "completed" && <button className="small-action" onClick={() => { setSelected(sale.id); setError(""); }}>Return</button>}</td></tr>)}</tbody></table>{!sales.isPending && !sales.data?.length && <EmptyState title="No sales found" detail="Adjust the search or date range, or complete a checkout sale." />}</div>
     </section>
     <section className="panel operation-table-panel"><div className="panel-heading"><div><div className="eyebrow">CASH REFUNDS</div><h2>Recent returns</h2></div></div>
       <div className="product-table-wrap"><table className="product-table"><thead><tr><th>REFUND</th><th>RECEIPT</th><th>REASON</th><th>PROCESSED BY</th><th>DATE</th><th>AMOUNT</th></tr></thead><tbody>{refunds.data?.map((refund) => <tr key={refund.id}><td className="sku-cell">{refund.refundNumber}</td><td>{refund.receiptNumber}</td><td>{refund.reason}</td><td>{refund.createdBy}</td><td>{new Date(refund.createdAt).toLocaleString("en-KE")}</td><td className="price-cell">{money(refund.total)}</td></tr>)}</tbody></table>{!refunds.isPending && !refunds.data?.length && <EmptyState title="No returns recorded" detail="Processed cash refunds will appear here." />}</div>
     </section>
+    {receiptSelected !== null && receiptQuery.data && <ReceiptDialog receipt={receiptQuery.data} width={receiptWidth} onWidthChange={setReceiptWidth} onClose={() => setReceiptSelected(null)} />}
+    {receiptSelected !== null && receiptQuery.isError && <ErrorBanner message={getErrorMessage(receiptQuery.error)} onRetry={() => void receiptQuery.refetch()} />}
   </section>;
 }
 
@@ -1532,6 +1633,13 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const [checkoutError, setCheckoutError] = useState("");
   const [openingCash, setOpeningCash] = useState("0.00");
   const [amountPaid, setAmountPaid] = useState("");
+  const [receipt, setReceipt] = useState<SaleReceipt | null>(null);
+  const [receiptWidth, setReceiptWidth] = useState<"58mm" | "80mm">("80mm");
+  const [paymentMethod, setPaymentMethod] = useState<"cash" | "bank_transfer">("cash");
+  const [bankReference, setBankReference] = useState("");
+  const [bankVerification, setBankVerification] = useState<{
+    id: number; amount: string; status: "pending" | "verified" | "rejected" | "used";
+  } | null>(null);
   const [selectedSearchIndex, setSelectedSearchIndex] = useState(0);
   const [shiftCloseOpen, setShiftCloseOpen] = useState(false);
   const [actualCashCounted, setActualCashCounted] = useState("");
@@ -1558,7 +1666,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     queryKey: ["shift-close-summary"],
     queryFn: async () => (await api.get<{ summary: {
       totalSales: string; cashSales: string; cardSales: string; mobileMoneySales: string;
-      refunds: string; transactionCount: number; expectedCash: string;
+      bankTransferSales: string; refunds: string; transactionCount: number; expectedCash: string;
     } }>("/shifts/close-summary")).data.summary,
     enabled: shiftCloseOpen && Boolean(activeShift.data),
   });
@@ -1599,27 +1707,61 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     queryKey: ["products", search],
     queryFn: async () => (await api.get<{ products: Product[] }>("/products", { params: { search } })).data.products,
   });
+  const requestBankVerification = useMutation({
+    mutationFn: async () => (await api.post<{ verification: BankTransferVerification }>("/bank-transfer-verifications", {
+      reference: bankReference.trim(),
+      amount: fromCents(payableCents),
+    })).data.verification,
+    onSuccess: (verification) => {
+      setBankVerification(verification);
+      setCheckoutError("");
+    },
+    onError: (error) => setCheckoutError(getErrorMessage(error)),
+  });
+  const checkBankVerification = useMutation({
+    mutationFn: async () => (await api.get<{ verification: BankTransferVerification }>("/bank-transfer-verifications/status", { params: { reference: bankReference.trim() } })).data.verification,
+    onSuccess: (verification) => {
+      setBankVerification(verification);
+      setCheckoutError("");
+    },
+    onError: (error) => setCheckoutError(getErrorMessage(error)),
+  });
   const checkout = useMutation({
     mutationFn: async () => {
       if (!idempotencyRef.current) idempotencyRef.current = crypto.randomUUID();
       const body = {
         items: aggregateCartItems(cart),
         discount: fromCents(discountAmountCents),
-        payments: [{ method: "cash", amount: fromCents(payableCents) }],
+        cashReceived: paymentMethod === "cash" ? amountPaid : fromCents(payableCents),
+        payments: [{
+          method: paymentMethod,
+          amount: fromCents(payableCents),
+          ...(paymentMethod === "bank_transfer" ? { providerReference: bankReference.trim() } : {}),
+        }],
       };
-      return (await api.post<{ sale: { receiptNumber: string; total: string; status: string } }>("/sales", body, {
+      return (await api.post<{ sale: { id: number; receiptNumber: string; total: string; status: string } }>("/sales", body, {
         headers: { "Idempotency-Key": idempotencyRef.current },
       })).data.sale;
     },
-    onSuccess: (sale) => {
+    onSuccess: async (sale) => {
       setToast(`Sale ${sale.receiptNumber} completed · ${money(sale.total)}`);
       setCart([]);
       setSaleDiscount("0.00");
+      setAmountPaid("");
+      setPaymentMethod("cash");
+      setBankReference("");
+      setBankVerification(null);
       setCheckoutError("");
       idempotencyRef.current = null;
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       void queryClient.invalidateQueries({ queryKey: ["products"] });
-      window.setTimeout(() => setToast(""), 5000);
+      void queryClient.invalidateQueries({ queryKey: ["sales"] });
+      try {
+        const { data } = await api.get<SaleReceipt>(`/sales/${sale.id}`);
+        setReceipt(data);
+      } catch (error) {
+        setCheckoutError(`Sale ${sale.receiptNumber} completed, but its receipt could not be loaded: ${getErrorMessage(error)}`);
+      }
     },
     onError: (error) => setCheckoutError(getErrorMessage(error)),
   });
@@ -1754,6 +1896,11 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const amountPaidCents = Math.round((Number(amountPaid) || 0) * 100);
   const balanceCents = Math.max(0, payableCents - amountPaidCents);
   const changeCents = Math.max(0, amountPaidCents - payableCents);
+  const bankTransferApprovedForTotal = bankVerification?.status === "verified"
+    && bankVerification.amount === fromCents(payableCents);
+  const canCompletePayment = paymentMethod === "cash"
+    ? Boolean(amountPaid.trim()) && amountPaidCents >= payableCents
+    : Boolean(bankReference.trim()) && bankTransferApprovedForTotal;
   useEffect(() => {
     const handleKey = (event: globalThis.KeyboardEvent) => {
       if (event.key === "F2") {
@@ -1769,13 +1916,13 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       if (event.key === "F7") { event.preventDefault(); void heldSalesQuery.refetch(); }
       if (event.key === "F9") {
         event.preventDefault();
-        if (canSell && cart.length && activeShift.data && !checkout.isPending) checkout.mutate();
+        if (canSell && cart.length && canCompletePayment && activeShift.data && !checkout.isPending) checkout.mutate();
       }
-      if (event.key === "Escape") { event.preventDefault(); setCart([]); setSaleDiscount("0.00"); }
+      if (event.key === "Escape") { event.preventDefault(); setCart([]); setSaleDiscount("0.00"); setAmountPaid(""); }
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [cart.length, canSell, activeShift.data, checkout.isPending, holdSaleMutation, heldSalesQuery]);
+  }, [cart.length, canSell, canCompletePayment, activeShift.data, checkout.isPending, holdSaleMutation, heldSalesQuery]);
 
   const actualCashNumber = Math.round((Number(actualCashCounted) || 0) * 100);
   const expectedCashNumber = Math.round(Number(shiftSummary.data?.expectedCash ?? 0) * 100);
@@ -1798,6 +1945,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
                 <div><span>Cash sales</span><strong>{money(shiftSummary.data.cashSales)}</strong></div>
                 <div><span>Card sales</span><strong>{money(shiftSummary.data.cardSales)}</strong></div>
                 <div><span>Mobile money</span><strong>{money(shiftSummary.data.mobileMoneySales)}</strong></div>
+                <div><span>Bank transfer</span><strong>{money(shiftSummary.data.bankTransferSales)}</strong></div>
                 <div><span>Refunds</span><strong>{money(shiftSummary.data.refunds)}</strong></div>
                 <div><span>Transactions</span><strong>{shiftSummary.data.transactionCount}</strong></div>
               </div>
@@ -1926,14 +2074,38 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
             <div><span>VAT</span><strong>{money(taxCents / 100)}</strong></div>
             <div className="payable"><span>Total payable</span><strong>{money(payableCents / 100)}</strong></div>
           </div>
-          <label className="pos-payment-input"><span>Amount received</span><input value={amountPaid} onChange={(event) => setAmountPaid(event.target.value)} inputMode="decimal" placeholder="0.00" /></label>
-          <div className="pos-payment-change"><span>{changeCents > 0 ? "Change due" : "Balance"}</span><strong>{money((changeCents > 0 ? changeCents : balanceCents) / 100)}</strong></div>
+          {paymentMethod === "cash" ? <>
+            <label className="pos-payment-input"><span>Amount received</span><input value={amountPaid} onChange={(event) => setAmountPaid(event.target.value)} inputMode="decimal" placeholder="0.00" /></label>
+            <div className="pos-payment-change"><span>{changeCents > 0 ? "Change due" : "Balance"}</span><strong>{money((changeCents > 0 ? changeCents : balanceCents) / 100)}</strong></div>
+          </> : <>
+            <label className="pos-payment-input"><span>Bank transaction reference</span><input value={bankReference} onChange={(event) => { setBankReference(event.target.value); setBankVerification(null); }} maxLength={100} autoComplete="off" placeholder="Enter bank transfer reference" /></label>
+            <div className="bank-verification-actions">
+              <button type="button" disabled={!cart.length || !activeShift.data || !bankReference.trim() || requestBankVerification.isPending || bankVerification?.status === "pending" || bankVerification?.status === "verified"} onClick={() => requestBankVerification.mutate()}>
+                {requestBankVerification.isPending ? "Submitting…" : "Request admin verification"}
+              </button>
+              <button type="button" disabled={!bankReference.trim() || checkBankVerification.isPending} onClick={() => checkBankVerification.mutate()}>
+                {checkBankVerification.isPending ? "Checking…" : "Check status"}
+              </button>
+            </div>
+            {bankVerification && <div className={`bank-verification-status status-${bankVerification.status}`} role="status">
+              {bankVerification.status === "verified"
+                ? `Approved for ${money(bankVerification.amount)}.`
+                : bankVerification.status === "pending"
+                  ? `Waiting for an administrator to verify ${money(bankVerification.amount)}.`
+                  : `Transfer status: ${bankVerification.status}.`}
+              {bankVerification.status === "verified" && bankVerification.amount !== fromCents(payableCents) && " Sale total changed; request verification for the exact total using a new reference."}
+            </div>}
+          </>}
           <div className="pos-payment-methods">
-            <button className="active">Cash</button>
-            <button disabled>M-Pesa</button><button disabled>Card</button><button disabled>Bank transfer</button><button disabled>Split</button>
+            <button className={paymentMethod === "cash" ? "active" : ""} type="button" onClick={() => setPaymentMethod("cash")}>Cash</button>
+            <button type="button" disabled title="Configure and verify a payment provider before enabling">M-Pesa</button>
+            <button type="button" disabled title="Configure and verify a payment provider before enabling">Card</button>
+            <button className={paymentMethod === "bank_transfer" ? "active" : ""} type="button" onClick={() => setPaymentMethod("bank_transfer")}>Bank transfer</button>
+            <button type="button" disabled title="Split payment requires verified non-cash providers">Split</button>
           </div>
+          <div className="payment-setup-note">{paymentMethod === "bank_transfer" ? "An administrator must independently verify the transfer before completing the sale." : "M-Pesa, card, and split checkout remain disabled until provider integrations are configured."}</div>
           <div className="pos-payment-actions">
-            <button className="complete" disabled={!canSell || !cart.length || checkout.isPending || !activeShift.data} onClick={() => checkout.mutate()}>{checkout.isPending ? "Processing…" : "Complete Sale"} <span>F9</span></button>
+            <button className="complete" disabled={!canSell || !cart.length || !canCompletePayment || checkout.isPending || !activeShift.data} onClick={() => checkout.mutate()}>{checkout.isPending ? "Processing…" : "Complete Sale"} <span>F9</span></button>
             <button className="hold" disabled={!cart.length || holdSaleMutation.isPending} onClick={() => holdSaleMutation.mutate()}>Hold Sale <span>F6</span></button>
             <button className="cancel" onClick={() => { setCart([]); setSaleDiscount("0.00"); setAmountPaid(""); }}>Cancel Sale <span>Esc</span></button>
           </div>
@@ -1945,6 +2117,20 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
         </aside>
       </div>
       <footer className="pos-statusbar"><span><i /> Ready for new sale...</span><time>{new Date().toLocaleString("en-KE")}</time><b>● Connected</b></footer>
+      {receipt && <ReceiptDialog
+        receipt={receipt}
+        width={receiptWidth}
+        onWidthChange={setReceiptWidth}
+        onClose={() => setReceipt(null)}
+        onNewSale={() => {
+          setReceipt(null);
+          setCart([]);
+          setSaleDiscount("0.00");
+          setAmountPaid("");
+          setCheckoutError("");
+          window.requestAnimationFrame(() => scannerRef.current?.focus());
+        }}
+      />}
     </section>
   );
 }
