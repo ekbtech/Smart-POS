@@ -1,0 +1,3 @@
+ALTER TABLE products
+  ADD COLUMN image_data MEDIUMBLOB NULL,
+  ADD COLUMN image_mime_type VARCHAR(30) NULL;

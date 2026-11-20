@@ -1,9 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowDownLeft, ArrowLeftRight, ArrowUpRight, Boxes, CalendarDays, ChevronDown, CircleDollarSign,
+  ArrowDownLeft, ArrowLeftRight, ArrowUpDown, ArrowUpRight, Boxes, CalendarDays, ChevronDown, CircleDollarSign,
   Command, LayoutDashboard, LogOut, PackagePlus, Plus, Search, ShieldCheck,
   ShoppingBasket, ShoppingCart, TrendingUp, X, Users, Truck, Banknote, ReceiptText, RotateCcw, Download,
-  Pause, Printer, Trash2,
+  Pause, Printer, Trash2, Upload,
 } from "lucide-react";
 import { lazy, Suspense, useMemo, useRef, useState } from "react";
 import { useEffect } from "react";
@@ -237,13 +237,68 @@ function DashboardPage({ user }: { user: User }) {
   );
 }
 
+const productCsvFields = ["sku", "barcode", "name", "category", "unit", "sellingPrice", "purchasePrice", "taxRate", "reorderLevel", "openingStock", "currentStock"];
+
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (quoted) {
+      if (character === '"' && text[index + 1] === '"') { cell += '"'; index += 1; }
+      else if (character === '"') quoted = false;
+      else cell += character;
+    } else if (character === '"' && cell.length === 0) quoted = true;
+    else if (character === ",") { row.push(cell); cell = ""; }
+    else if (character === "\n") {
+      row.push(cell.replace(/\r$/, ""));
+      if (row.some((value) => value.trim())) rows.push(row);
+      row = [];
+      cell = "";
+    } else cell += character;
+  }
+  if (quoted) throw new Error("The CSV file contains an unclosed quoted field.");
+  if (cell.length || row.length) {
+    row.push(cell.replace(/\r$/, ""));
+    if (row.some((value) => value.trim())) rows.push(row);
+  }
+  return rows;
+}
+
+function csvCell(value: string | number | null): string {
+  const raw = value === null ? "" : String(value);
+  const text = /^[=+\-@]/.test(raw) ? `'${raw}` : raw;
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function downloadCsv(filename: string, rows: Array<Array<string | number | null>>) {
+  const contents = `\uFEFF${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
+  const url = URL.createObjectURL(new Blob([contents], { type: "text/csv;charset=utf-8" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 function ProductsPage({ user }: { user: User }) {
   const query = useQueryClient();
   const [search, setSearch] = useState("");
+  const [category, setCategory] = useState("");
+  const [stockStatus, setStockStatus] = useState("");
+  const [sort, setSort] = useState("name");
+  const [direction, setDirection] = useState<"asc" | "desc">("asc");
+  const [page, setPage] = useState(1);
   const [formError, setFormError] = useState("");
-  const canManage = user.roles.some((role) => ["admin", "manager", "inventory_manager"].includes(role));
   const [success, setSuccess] = useState("");
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<{ imported: number; failures: string[]; failureCount: number } | null>(null);
+  const canManage = user.roles.some((role) => ["admin", "manager", "inventory_manager"].includes(role));
   const schema = z.object({
     sku: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/, "Use letters, numbers, dots, dashes, or underscores."),
     barcode: z.string().trim().max(64).optional(),
@@ -257,49 +312,99 @@ function ProductsPage({ user }: { user: User }) {
     openingStock: z.string().regex(/^\d{1,9}(\.\d{1,3})?$/),
   });
   type ProductForm = z.infer<typeof schema>;
-  const form = useForm<ProductForm>({
-    resolver: zodResolver(schema),
-    defaultValues: {
-      sku: "", barcode: "", name: "", category: "", unit: "piece",
-      sellingPrice: "", purchasePrice: "", taxRate: "0", reorderLevel: "0", openingStock: "0",
-    },
-  });
+  const emptyForm: ProductForm = {
+    sku: "", barcode: "", name: "", category: "", unit: "piece",
+    sellingPrice: "", purchasePrice: "", taxRate: "0", reorderLevel: "0", openingStock: "0",
+  };
+  const form = useForm<ProductForm>({ resolver: zodResolver(schema), defaultValues: emptyForm });
+  const filters = { search, category, stockStatus, sort, direction };
   const products = useQuery({
-    queryKey: ["products", search],
-    queryFn: async () => (await api.get<{ products: Product[] }>("/products", { params: { search } })).data.products,
+    queryKey: ["products", filters, page],
+    queryFn: async () => (await api.get<{ products: Product[]; pagination: { page: number; pageSize: number; total: number; totalPages: number } }>(
+      "/products", { params: { ...filters, page, pageSize: 20 } },
+    )).data,
   });
+  const categories = useQuery({
+    queryKey: ["product-categories"],
+    queryFn: async () => (await api.get<{ categories: string[] }>("/products/categories")).data.categories,
+  });
+  useEffect(() => {
+    setPage(1);
+  }, [search, category, stockStatus, sort, direction]);
+  useEffect(() => {
+    if (!imageFile) { setImagePreview(null); return; }
+    const url = URL.createObjectURL(imageFile);
+    setImagePreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [imageFile]);
+
   const create = useMutation({
-    mutationFn: async (values: ProductForm) => api.post("/products", {
-      ...values,
-      barcode: values.barcode || undefined,
-    }),
-    onSuccess: () => {
-      form.reset();
+    mutationFn: async (values: ProductForm) => {
+      const { data } = await api.post<{ product: { id: number } }>("/products", {
+        ...values, barcode: values.barcode || undefined,
+      });
+      let imageError: string | null = null;
+      if (imageFile) {
+        try {
+          await api.put(`/products/${data.product.id}/image`, imageFile, { headers: { "Content-Type": imageFile.type } });
+        } catch (error) {
+          imageError = getErrorMessage(error);
+        }
+      }
+      return imageError;
+    },
+    onSuccess: (imageError) => {
+      form.reset(emptyForm);
+      setImageFile(null);
       setFormError("");
-      setSuccess("Product saved. Its opening stock is now in the branch ledger.");
+      setSuccess(imageError
+        ? `Product saved, but its image could not be uploaded: ${imageError}`
+        : "Product saved. Its opening stock is now in the branch ledger.");
       void query.invalidateQueries({ queryKey: ["products"] });
+      void query.invalidateQueries({ queryKey: ["product-categories"] });
+      void query.invalidateQueries({ queryKey: ["inventory-summary"] });
       void query.invalidateQueries({ queryKey: ["dashboard"] });
+      setPage(1);
     },
     onError: (error) => setFormError(getErrorMessage(error)),
   });
   const update = useMutation({
-    mutationFn: async (values: ProductForm) => api.patch(`/products/${editingProduct!.id}`, {
-      sku: values.sku,
-      barcode: values.barcode || null,
-      name: values.name,
-      category: values.category,
-      unit: values.unit,
-      sellingPrice: values.sellingPrice,
-      purchasePrice: values.purchasePrice || null,
-      taxRate: values.taxRate,
-      reorderLevel: values.reorderLevel,
-    }),
-    onSuccess: () => {
+    mutationFn: async (values: ProductForm) => {
+      await api.patch(`/products/${editingProduct!.id}`, {
+        sku: values.sku, barcode: values.barcode || null, name: values.name, category: values.category,
+        unit: values.unit, sellingPrice: values.sellingPrice, purchasePrice: values.purchasePrice || null,
+        taxRate: values.taxRate, reorderLevel: values.reorderLevel,
+      });
+      let imageError: string | null = null;
+      if (imageFile) {
+        try {
+          await api.put(`/products/${editingProduct!.id}/image`, imageFile, { headers: { "Content-Type": imageFile.type } });
+        } catch (error) {
+          imageError = getErrorMessage(error);
+        }
+      }
+      return imageError;
+    },
+    onSuccess: (imageError) => {
       setEditingProduct(null);
-      form.reset({ sku: "", barcode: "", name: "", category: "", unit: "piece", sellingPrice: "", purchasePrice: "", taxRate: "0", reorderLevel: "0", openingStock: "0" });
-      setSuccess("Product details updated.");
+      setImageFile(null);
+      form.reset(emptyForm);
+      setSuccess(imageError ? `Product details saved, but its image could not be uploaded: ${imageError}` : "Product details updated.");
       void query.invalidateQueries({ queryKey: ["products"] });
+      void query.invalidateQueries({ queryKey: ["product-categories"] });
+      void query.invalidateQueries({ queryKey: ["inventory-summary"] });
       void query.invalidateQueries({ queryKey: ["reports"] });
+      setPage(1);
+    },
+    onError: (error) => setFormError(getErrorMessage(error)),
+  });
+  const removeImage = useMutation({
+    mutationFn: (id: number) => api.delete(`/products/${id}/image`),
+    onSuccess: () => {
+      setImageFile(null);
+      setEditingProduct((current) => current ? { ...current, hasImage: false } : current);
+      setSuccess("Product image removed.");
+      void query.invalidateQueries({ queryKey: ["products"] });
     },
     onError: (error) => setFormError(getErrorMessage(error)),
   });
@@ -308,34 +413,157 @@ function ProductsPage({ user }: { user: User }) {
     onSuccess: () => {
       setSuccess("Product archived and removed from the active catalogue.");
       void query.invalidateQueries({ queryKey: ["products"] });
+      void query.invalidateQueries({ queryKey: ["inventory-summary"] });
+      void query.invalidateQueries({ queryKey: ["product-categories"] });
       void query.invalidateQueries({ queryKey: ["dashboard"] });
+      setPage(1);
     },
     onError: (error) => setFormError(getErrorMessage(error)),
   });
+
+  const exportProducts = async () => {
+    setFormError("");
+    try {
+      const first = await api.get<{ products: Product[]; pagination: { totalPages: number } }>("/products", {
+        params: { ...filters, page: 1, pageSize: 100 },
+      });
+      const rows = [...first.data.products];
+      for (let currentPage = 2; currentPage <= first.data.pagination.totalPages; currentPage += 1) {
+        const { data } = await api.get<{ products: Product[] }>("/products", {
+          params: { ...filters, page: currentPage, pageSize: 100 },
+        });
+        rows.push(...data.products);
+      }
+      downloadCsv("smart-pos-products.csv", [
+        productCsvFields,
+        ...rows.map((product) => [
+          product.sku, product.barcode ?? "", product.name, product.category, product.unit,
+          product.sellingPrice, product.purchasePrice ?? "", product.taxRate, product.reorderLevel, "0", product.stock,
+        ]),
+      ]);
+    } catch (error) {
+      setFormError(`Export failed: ${getErrorMessage(error)}`);
+    }
+  };
+  const importProducts = async (file: File) => {
+    setImporting(true);
+    setImportResult(null);
+    setFormError("");
+    try {
+      const [headerRow, ...dataRows] = parseCsv(await file.text());
+      if (!headerRow) throw new Error("The CSV file is empty.");
+      if (dataRows.length > 1000) throw new Error("Import supports up to 1,000 products per CSV file.");
+      const headerNames = headerRow.map((header) => header.trim().toLowerCase().replace(/[^a-z0-9]/g, ""));
+      const aliases: Record<string, string[]> = {
+        sku: ["sku", "productcode", "code"], barcode: ["barcode"], name: ["name", "productname"],
+        category: ["category"], unit: ["unit"], sellingPrice: ["sellingprice", "price"],
+        purchasePrice: ["purchaseprice", "purchasecost"], taxRate: ["taxrate", "tax"],
+        reorderLevel: ["reorderlevel", "reorderat"], openingStock: ["openingstock", "stock"],
+      };
+      const columnIndexes = Object.fromEntries(Object.entries(aliases).map(([field, names]) => [
+        field, headerNames.findIndex((header) => names.includes(header)),
+      ]));
+      const requiredFields = ["sku", "name", "category", "unit", "sellingPrice"];
+      const missing = requiredFields.filter((field) => columnIndexes[field] === -1);
+      if (missing.length) throw new Error(`Missing required CSV columns: ${missing.join(", ")}.`);
+      let imported = 0;
+      const failures: string[] = [];
+      for (const [index, row] of dataRows.entries()) {
+        const value = (field: string, fallback = "") => {
+          const columnIndex = columnIndexes[field];
+          return columnIndex >= 0 ? row[columnIndex]?.trim() ?? fallback : fallback;
+        };
+        const parsed = schema.safeParse({
+          sku: value("sku"), barcode: value("barcode"), name: value("name"), category: value("category"),
+          unit: value("unit"), sellingPrice: value("sellingPrice"), purchasePrice: value("purchasePrice"),
+          taxRate: value("taxRate", "0") || "0", reorderLevel: value("reorderLevel", "0") || "0",
+          openingStock: value("openingStock", "0") || "0",
+        });
+        if (!parsed.success) {
+          failures.push(`Row ${index + 2}: invalid product fields.`);
+          continue;
+        }
+        try {
+          await api.post("/products", { ...parsed.data, barcode: parsed.data.barcode || undefined });
+          imported += 1;
+        } catch (error) {
+          failures.push(`Row ${index + 2}: ${getErrorMessage(error)}`);
+        }
+      }
+      setImportResult({ imported, failures: failures.slice(0, 8), failureCount: failures.length });
+      void query.invalidateQueries({ queryKey: ["products"] });
+      void query.invalidateQueries({ queryKey: ["product-categories"] });
+      void query.invalidateQueries({ queryKey: ["inventory-summary"] });
+      void query.invalidateQueries({ queryKey: ["dashboard"] });
+      setPage(1);
+    } catch (error) {
+      setFormError(`Import failed: ${getErrorMessage(error)}`);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const rows = products.data?.products ?? [];
+  const pagination = products.data?.pagination;
   return (
     <section className="page-content products-page">
       <div className="page-heading">
-        <div><div className="eyebrow"><span className="eyebrow-dot" /> CATALOGUE</div><h1>Your products<span className="heading-period">.</span></h1><p>Keep the products on your shelf easy to find and ready to sell.</p></div>
-        <div className="product-total"><PackagePlus size={17} /> {products.data?.length ?? "—"} SHOWN</div>
+        <div><div className="eyebrow"><span className="eyebrow-dot" /> CATALOGUE</div><h1>Product catalogue<span className="heading-period">.</span></h1><p>Manage product details, pricing, images and branch stock levels.</p></div>
+        <div className="product-total"><PackagePlus size={17} /> {pagination?.total ?? "—"} PRODUCTS</div>
       </div>
-      <div className={`products-layout ${canManage ? "" : "read-only"}`}>
-        <section className="panel product-table-panel">
-          <div className="products-toolbar"><div><div className="eyebrow">PRODUCT LIST</div><h2>Catalogue</h2></div><label className="table-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find by name, SKU, barcode" /></label></div>
-          {products.isError && <ErrorBanner message={getErrorMessage(products.error)} onRetry={() => void products.refetch()} />}
-          {products.isPending ? <LoadingRows /> : products.data?.length ? <div className="product-table-wrap"><table className="product-table">
-            <thead><tr><th>PRODUCT</th><th>SKU</th><th>UNIT PRICE</th><th>IN STOCK</th><th>STATUS</th>{canManage && <th>ACTION</th>}</tr></thead>
-            <tbody>{products.data.map((product) => {
+      {success && <div role="status" className="success-banner">{success}<button onClick={() => setSuccess("")} aria-label="Dismiss"><X size={15} /></button></div>}
+      {formError && <ErrorBanner message={formError} onRetry={() => setFormError("")} />}
+      <section className="panel product-table-panel">
+        <div className="products-toolbar">
+          <div><div className="eyebrow">PRODUCT LIST</div><h2>Catalogue</h2></div>
+          <label className="table-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find by name, SKU or barcode" /></label>
+        </div>
+        <div className="catalogue-controls">
+          <select aria-label="Filter by category" value={category} onChange={(event) => setCategory(event.target.value)}>
+            <option value="">All categories</option>{categories.data?.map((item) => <option value={item} key={item}>{item}</option>)}
+          </select>
+          <select aria-label="Filter by stock status" value={stockStatus} onChange={(event) => setStockStatus(event.target.value)}>
+            <option value="">All stock statuses</option><option value="in_stock">In stock</option><option value="low_stock">Low stock</option><option value="out_of_stock">Out of stock</option>
+          </select>
+          <select aria-label="Sort products" value={sort} onChange={(event) => setSort(event.target.value)}>
+            <option value="name">Sort: Name</option><option value="price">Sort: Selling price</option><option value="stock">Sort: Stock quantity</option>
+          </select>
+          <button className="small-action" type="button" onClick={() => setDirection((current) => current === "asc" ? "desc" : "asc")} title={`Sort ${direction === "asc" ? "ascending" : "descending"}`}><ArrowUpDown size={14} /> {direction === "asc" ? "Ascending" : "Descending"}</button>
+          {canManage && <>
+            <label className={`small-action file-action ${importing ? "is-disabled" : ""}`}><Upload size={14} /> {importing ? "Importing…" : "Import CSV"}<input type="file" accept=".csv,text/csv" disabled={importing} onChange={(event) => { const file = event.target.files?.[0]; if (file) { if (file.size > 5 * 1024 * 1024) setFormError("CSV files must be 5 MB or smaller."); else void importProducts(file); } event.currentTarget.value = ""; }} /></label>
+          </>}
+          <button className="small-action" type="button" onClick={() => void exportProducts()}><Download size={14} /> Export CSV</button>
+        </div>
+        {importResult && <div role="status" className="import-result">
+          <strong>Imported {importResult.imported} product{importResult.imported === 1 ? "" : "s"}.</strong>
+          {importResult.failureCount > 0 && <span>{importResult.failureCount} row(s) need attention: {importResult.failures.join(" · ")}{importResult.failureCount > importResult.failures.length ? " · More errors omitted" : ""}</span>}
+        </div>}
+        {products.isError && <ErrorBanner message={getErrorMessage(products.error)} onRetry={() => void products.refetch()} />}
+        {categories.isError && <ErrorBanner message={getErrorMessage(categories.error)} onRetry={() => void categories.refetch()} />}
+        {products.isPending ? <LoadingRows /> : rows.length ? <>
+          <div className="product-table-wrap"><table className="product-table catalogue-table">
+            <thead><tr><th>PRODUCT</th><th>SKU / BARCODE</th><th>CATEGORY</th><th>SELLING PRICE</th><th>PURCHASE COST</th><th>AVAILABLE</th><th>STATUS</th>{canManage && <th>ACTION</th>}</tr></thead>
+            <tbody>{rows.map((product) => {
               const stock = Number(product.stock);
-              const low = stock <= Number(product.reorderLevel);
+              const status = stock <= 0 ? "OUT OF STOCK" : stock <= Number(product.reorderLevel) ? "LOW STOCK" : "IN STOCK";
+              const statusClass = stock <= 0 ? "status-out" : status === "LOW STOCK" ? "status-low" : "";
               return <tr key={product.id}>
-                <td><div className="table-product-name"><span>{product.name.slice(0, 1).toUpperCase()}</span><div><strong>{product.name}</strong><small>{product.category} · {product.unit}</small></div></div></td>
-                <td className="sku-cell">{product.sku}</td>
+                <td><div className="table-product-name">
+                  {product.hasImage
+                    ? <img className="product-thumbnail" src={`/api/products/${product.id}/image`} alt="" loading="lazy" />
+                    : <span>{product.name.slice(0, 1).toUpperCase()}</span>}
+                  <div><strong>{product.name}</strong><small>{product.unit}</small></div>
+                </div></td>
+                <td className="sku-cell">{product.sku}<small className="secondary-code">{product.barcode || "No barcode"}</small></td>
+                <td>{product.category}</td>
                 <td className="price-cell">{money(product.sellingPrice)}</td>
-                <td className="stock-cell">{stock.toFixed(0)}</td>
-                <td><span className={`product-status ${low ? "status-low" : ""}`}><i /> {low ? "LOW STOCK" : "IN STOCK"}</span></td>
+                <td>{product.purchasePrice ? money(product.purchasePrice) : "—"}</td>
+                <td className="stock-cell">{Number(product.stock).toLocaleString("en-KE", { maximumFractionDigits: 3 })}</td>
+                <td><span className={`product-status ${statusClass}`}><i /> {status}</span></td>
                 {canManage && <td className="row-actions">
                   <button className="small-action" onClick={() => {
                     setEditingProduct(product);
+                    setImageFile(null);
                     setFormError("");
                     form.reset({
                       sku: product.sku, barcode: product.barcode ?? "", name: product.name, category: product.category,
@@ -348,37 +576,59 @@ function ProductsPage({ user }: { user: User }) {
                 </td>}
               </tr>;
             })}</tbody>
-          </table></div> : <EmptyState title="No products yet" detail="Register the first product for your store." />}
-        </section>
-        {canManage && <section className="panel create-product-panel">
-          <div className="create-heading"><div className="create-icon"><PackagePlus size={17} /></div><div><div className="eyebrow">CATALOGUE ACTION</div><h2>{editingProduct ? "Edit product" : "Add a product"}</h2></div></div>
-          <p className="create-description">{editingProduct ? "Changes apply to this product across the shared catalogue." : "Enter the shelf price and opening stock for this branch."}</p>
-          {success && <div role="status" className="success-banner">{success}<button onClick={() => setSuccess("")} aria-label="Dismiss"><X size={15} /></button></div>}
-          {formError && <ErrorBanner message={formError} onRetry={() => setFormError("")} />}
-          <form className="product-form" onSubmit={form.handleSubmit((values) => { setFormError(""); setSuccess(""); editingProduct ? update.mutate(values) : create.mutate(values); })}>
-            <label>Product name<input placeholder="e.g. Long-life milk 1L" {...form.register("name")} />{form.formState.errors.name && <small>{form.formState.errors.name.message}</small>}</label>
-            <div className="form-pair">
-              <label>SKU<input placeholder="e.g. DAIR-012" {...form.register("sku")} />{form.formState.errors.sku && <small>Enter a valid SKU.</small>}</label>
-              <label>Barcode<input placeholder="Optional" {...form.register("barcode")} /></label>
+          </table></div>
+          <div className="catalogue-pagination">
+            <span>Showing {(page - 1) * (pagination?.pageSize ?? 20) + 1}–{Math.min(page * (pagination?.pageSize ?? 20), pagination?.total ?? 0)} of {pagination?.total ?? 0}</span>
+            <div><button className="small-action" disabled={page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><span>Page {page} of {Math.max(pagination?.totalPages ?? 1, 1)}</span><button className="small-action" disabled={page >= (pagination?.totalPages ?? 1)} onClick={() => setPage((current) => current + 1)}>Next</button></div>
+          </div>
+        </> : <EmptyState title="No products match these filters" detail="Adjust the search or filters, or register a new product." />}
+      </section>
+      {canManage && <section className="panel create-product-panel">
+        <div className="create-heading"><div className="create-icon"><PackagePlus size={17} /></div><div><div className="eyebrow">CATALOGUE ACTION</div><h2>{editingProduct ? "Edit product" : "Add a product"}</h2></div></div>
+        <p className="create-description">{editingProduct ? "Changes apply to this product across the shared catalogue." : "Add product details, an optional image and opening stock for this branch."}</p>
+        <form className="product-form" onSubmit={form.handleSubmit((values) => { setFormError(""); setSuccess(""); editingProduct ? update.mutate(values) : create.mutate(values); })}>
+          <div className="product-image-field"><span>Product image</span>
+            <div className="product-image-editor">
+              {imagePreview || (editingProduct?.hasImage ? `/api/products/${editingProduct.id}/image` : null)
+                ? <img src={imagePreview ?? `/api/products/${editingProduct!.id}/image`} alt="Product preview" />
+                : <span>{editingProduct?.name.slice(0, 1).toUpperCase() ?? "+"}</span>}
+              <div><label className="small-action file-action"><Upload size={14} /> Choose image<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (!file) return;
+                if (!["image/jpeg", "image/png", "image/webp"].includes(file.type) || file.size > 5 * 1024 * 1024) {
+                  setFormError("Choose a JPEG, PNG, or WebP image up to 5 MB.");
+                } else {
+                  setFormError("");
+                  setImageFile(file);
+                }
+                event.currentTarget.value = "";
+              }} /></label>
+              <small>JPEG, PNG or WebP · maximum 5 MB</small>
+              {editingProduct?.hasImage && !imageFile && <button type="button" className="small-action small-action-danger" onClick={() => removeImage.mutate(editingProduct.id)} disabled={removeImage.isPending}>{removeImage.isPending ? "Removing…" : "Remove current image"}</button>}</div>
             </div>
-            <div className="form-pair">
-              <label>Category<input placeholder="e.g. Dairy" {...form.register("category")} /></label>
-              <label>Unit<select {...form.register("unit")}><option value="piece">Piece</option><option value="packet">Packet</option><option value="carton">Carton</option><option value="kg">Kilogram</option><option value="g">Gram</option><option value="litre">Litre</option><option value="ml">Millilitre</option></select></label>
-            </div>
-            <div className="form-pair">
-              <label>Selling price<input inputMode="decimal" placeholder="0.00" {...form.register("sellingPrice")} />{form.formState.errors.sellingPrice && <small>Enter a valid amount.</small>}</label>
-              <label>Purchase cost<input inputMode="decimal" placeholder="Optional" {...form.register("purchasePrice")} /></label>
-            </div>
-            <div className="form-pair">
-              <label>Tax rate (%)<input inputMode="decimal" placeholder="0" {...form.register("taxRate")} />{form.formState.errors.taxRate && <small>Use a rate from 0 to 100.</small>}</label>
-              <label>Reorder at<input inputMode="decimal" placeholder="0" {...form.register("reorderLevel")} /></label>
-            </div>
-            {!editingProduct && <label>Opening stock<input inputMode="decimal" placeholder="0" {...form.register("openingStock")} /></label>}
-            <button className="button button-dark create-product-button" disabled={create.isPending || update.isPending}><Plus size={16} /> {editingProduct ? update.isPending ? "Updating…" : "Save changes" : create.isPending ? "Saving product…" : "Save product"} <ArrowUpRight size={15} /></button>
-            {editingProduct ? <button type="button" className="small-action" onClick={() => { setEditingProduct(null); form.reset(); }}>Cancel editing</button> : <div className="checkout-footnote"><ShieldCheck size={14} /> Opening stock is recorded in the stock ledger</div>}
-          </form>
-        </section>}
-      </div>
+          </div>
+          <label>Product name<input placeholder="e.g. Long-life milk 1L" {...form.register("name")} />{form.formState.errors.name && <small>{form.formState.errors.name.message}</small>}</label>
+          <div className="form-pair">
+            <label>SKU / product code<input placeholder="e.g. DAIR-012" {...form.register("sku")} />{form.formState.errors.sku && <small>Enter a valid SKU.</small>}</label>
+            <label>Barcode<input placeholder="Optional" {...form.register("barcode")} /></label>
+          </div>
+          <div className="form-pair">
+            <label>Category<input placeholder="e.g. Dairy" list="product-category-options" {...form.register("category")} /><datalist id="product-category-options">{categories.data?.map((item) => <option value={item} key={item} />)}</datalist></label>
+            <label>Unit<select {...form.register("unit")}><option value="piece">Piece</option><option value="packet">Packet</option><option value="carton">Carton</option><option value="kg">Kilogram</option><option value="g">Gram</option><option value="litre">Litre</option><option value="ml">Millilitre</option></select></label>
+          </div>
+          <div className="form-pair">
+            <label>Selling price (KSh)<input inputMode="decimal" placeholder="0.00" {...form.register("sellingPrice")} />{form.formState.errors.sellingPrice && <small>Enter a valid amount.</small>}</label>
+            <label>Purchase cost (KSh)<input inputMode="decimal" placeholder="Optional" {...form.register("purchasePrice")} /></label>
+          </div>
+          <div className="form-pair">
+            <label>Tax rate (%)<input inputMode="decimal" placeholder="0" {...form.register("taxRate")} />{form.formState.errors.taxRate && <small>Use a rate from 0 to 100.</small>}</label>
+            <label>Reorder level<input inputMode="decimal" placeholder="0" {...form.register("reorderLevel")} /></label>
+          </div>
+          {!editingProduct && <label>Opening stock<input inputMode="decimal" placeholder="0" {...form.register("openingStock")} /></label>}
+          <button className="button button-dark create-product-button" disabled={create.isPending || update.isPending}><Plus size={16} /> {editingProduct ? update.isPending ? "Updating…" : "Save changes" : create.isPending ? "Saving product…" : "Save product"} <ArrowUpRight size={15} /></button>
+          {editingProduct ? <button type="button" className="small-action" onClick={() => { setEditingProduct(null); setImageFile(null); form.reset(emptyForm); }}>Cancel editing</button> : <div className="checkout-footnote"><ShieldCheck size={14} /> Opening stock is recorded in the stock ledger</div>}
+        </form>
+      </section>}
     </section>
   );
 }
@@ -386,18 +636,33 @@ function ProductsPage({ user }: { user: User }) {
 function InventoryPage({ user }: { user: User }) {
   const query = useQueryClient();
   const [search, setSearch] = useState("");
+  const [stockFilter, setStockFilter] = useState("");
+  const [inventorySort, setInventorySort] = useState("name");
+  const [inventoryDirection, setInventoryDirection] = useState<"asc" | "desc">("asc");
+  const [inventoryPage, setInventoryPage] = useState(1);
   const [error, setError] = useState("");
+  const adjustmentRef = useRef<HTMLElement | null>(null);
   const canAdjust = user.roles.some((role) => ["admin", "manager", "inventory_manager"].includes(role));
+  const inventorySummary = useQuery({
+    queryKey: ["inventory-summary"],
+    queryFn: async () => (await api.get<{ summary: {
+      totalProducts: number; totalStock: string; lowStockProducts: number;
+      outOfStockProducts: number; stockValuation: string; uncostedProducts: number;
+    } }>("/inventory/summary")).data.summary,
+  });
   const inventory = useQuery({
     queryKey: ["inventory", search],
     queryFn: async () => (await api.get<{ items: Array<{
       id: number; sku: string; name: string; category: string; unit: string; onHand: string;
-      reserved: string; available: string; reorderLevel: string; updatedAt: string;
+      reserved: string; available: string; reorderLevel: string; updatedAt: string; hasImage: boolean; cost: string | null;
     }>; movements: Array<{
       id: number; product: string; sku: string; type: string; quantity: string;
       reference: string | null; createdBy: string; createdAt: string;
     }> }>("/inventory", { params: { search } })).data,
   });
+  useEffect(() => {
+    setInventoryPage(1);
+  }, [search, stockFilter, inventorySort, inventoryDirection]);
   const [productId, setProductId] = useState("");
   const [direction, setDirection] = useState<"in" | "out">("in");
   const [quantity, setQuantity] = useState("1");
@@ -420,6 +685,7 @@ function InventoryPage({ user }: { user: User }) {
       setReason("");
       setError("");
       void query.invalidateQueries({ queryKey: ["inventory"] });
+      void query.invalidateQueries({ queryKey: ["inventory-summary"] });
       void query.invalidateQueries({ queryKey: ["products"] });
       void query.invalidateQueries({ queryKey: ["dashboard"] });
     },
@@ -502,6 +768,7 @@ function InventoryPage({ user }: { user: User }) {
       setError("");
       void query.invalidateQueries({ queryKey: ["stock-takes"] });
       void query.invalidateQueries({ queryKey: ["inventory"] });
+      void query.invalidateQueries({ queryKey: ["inventory-summary"] });
       void query.invalidateQueries({ queryKey: ["inventory-expiry"] });
       void query.invalidateQueries({ queryKey: ["products"] });
       void query.invalidateQueries({ queryKey: ["dashboard"] });
@@ -528,6 +795,7 @@ function InventoryPage({ user }: { user: User }) {
       setError("");
       void query.invalidateQueries({ queryKey: ["inventory-transfers"] });
       void query.invalidateQueries({ queryKey: ["inventory"] });
+      void query.invalidateQueries({ queryKey: ["inventory-summary"] });
       void query.invalidateQueries({ queryKey: ["products"] });
       void query.invalidateQueries({ queryKey: ["dashboard"] });
     },
@@ -546,6 +814,7 @@ function InventoryPage({ user }: { user: User }) {
       setError("");
       void query.invalidateQueries({ queryKey: ["inventory-transfers"] });
       void query.invalidateQueries({ queryKey: ["inventory"] });
+      void query.invalidateQueries({ queryKey: ["inventory-summary"] });
       void query.invalidateQueries({ queryKey: ["inventory-expiry"] });
       void query.invalidateQueries({ queryKey: ["products"] });
       void query.invalidateQueries({ queryKey: ["dashboard"] });
@@ -562,12 +831,39 @@ function InventoryPage({ user }: { user: User }) {
       const value = receivedQuantities[item.productId] ?? item.quantityDispatched ?? "";
       return /^\d{1,9}(\.\d{1,3})?$/.test(value) && Number(value) <= Number(item.quantityDispatched);
     });
+  const filteredInventory = (inventory.data?.items ?? [])
+    .filter((item) => {
+      const available = Number(item.available);
+      if (stockFilter === "in_stock") return available > Number(item.reorderLevel);
+      if (stockFilter === "low_stock") return available > 0 && available <= Number(item.reorderLevel);
+      if (stockFilter === "out_of_stock") return available <= 0;
+      return true;
+    })
+    .sort((first, second) => {
+      const result = inventorySort === "stock"
+        ? Number(first.available) - Number(second.available)
+        : inventorySort === "updated"
+          ? Date.parse(first.updatedAt) - Date.parse(second.updatedAt)
+          : first.name.localeCompare(second.name);
+      return inventoryDirection === "asc" ? result : -result;
+    });
+  const inventoryPageSize = 20;
+  const inventoryPageCount = Math.max(1, Math.ceil(filteredInventory.length / inventoryPageSize));
+  const inventoryPageItems = filteredInventory.slice((inventoryPage - 1) * inventoryPageSize, inventoryPage * inventoryPageSize);
   return (
-    <section className="page-content operations-page">
+    <section className="page-content operations-page inventory-page">
       <PageHeader eyebrow="STOCK CONTROL" title="Inventory" detail="Branch stock balances and an auditable movement ledger." />
       {error && <ErrorBanner message={error} onRetry={() => setError("")} />}
       {inventory.isError && <ErrorBanner message={getErrorMessage(inventory.error)} onRetry={() => void inventory.refetch()} />}
-      {canAdjust && <section className="panel operation-form-panel">
+      {inventorySummary.isError && <ErrorBanner message={getErrorMessage(inventorySummary.error)} onRetry={() => void inventorySummary.refetch()} />}
+      <div className="inventory-metrics">
+        <div className="inventory-metric"><span>TOTAL PRODUCTS</span><strong>{inventorySummary.data?.totalProducts ?? "—"}</strong><small>Active catalogue items</small></div>
+        <div className="inventory-metric"><span>STOCK QUANTITY</span><strong>{inventorySummary.data ? Number(inventorySummary.data.totalStock).toLocaleString("en-KE", { maximumFractionDigits: 3 }) : "—"}</strong><small>Available units</small></div>
+        <button aria-pressed={stockFilter === "low_stock"} className={`inventory-metric metric-warning ${stockFilter === "low_stock" ? "selected" : ""}`} onClick={() => setStockFilter((current) => current === "low_stock" ? "" : "low_stock")}><span>LOW STOCK</span><strong>{inventorySummary.data?.lowStockProducts ?? "—"}</strong><small>At or below reorder level</small></button>
+        <button aria-pressed={stockFilter === "out_of_stock"} className={`inventory-metric metric-danger ${stockFilter === "out_of_stock" ? "selected" : ""}`} onClick={() => setStockFilter((current) => current === "out_of_stock" ? "" : "out_of_stock")}><span>OUT OF STOCK</span><strong>{inventorySummary.data?.outOfStockProducts ?? "—"}</strong><small>Needs replenishment</small></button>
+        <div className="inventory-metric metric-value-card"><span>STOCK VALUATION</span><strong>{inventorySummary.data ? money(inventorySummary.data.stockValuation) : "—"}</strong><small>{inventorySummary.data?.uncostedProducts ? `Excludes ${inventorySummary.data.uncostedProducts} products without cost` : "At purchase cost"}</small></div>
+      </div>
+      {canAdjust && <section ref={adjustmentRef} className="panel operation-form-panel">
         <div className="panel-heading"><div><div className="eyebrow">STOCK ADJUSTMENT</div><h2>Record a stock movement</h2></div></div>
         <form className="operation-form" onSubmit={(event) => { event.preventDefault(); setError(""); adjust.mutate(); }}>
           <label>Product<select value={productId} onChange={(event) => setProductId(event.target.value)} required><option value="">Select product</option>{inventory.data?.items.map((item) => <option value={item.id} key={item.id}>{item.name} · {item.sku}</option>)}</select></label>
@@ -582,13 +878,37 @@ function InventoryPage({ user }: { user: User }) {
         </form>
       </section>}
       <section className="panel operation-table-panel">
-        <div className="products-toolbar"><div><div className="eyebrow">BRANCH BALANCES</div><h2>On-hand inventory</h2></div><label className="table-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search catalogue" /></label></div>
-        {inventory.isPending ? <LoadingRows /> : <div className="product-table-wrap"><table className="product-table"><thead><tr><th>PRODUCT</th><th>SKU</th><th>ON HAND</th><th>RESERVED</th><th>AVAILABLE</th><th>REORDER AT</th><th>STATUS</th></tr></thead><tbody>
-          {inventory.data?.items.map((item) => {
-            const low = Number(item.available) <= Number(item.reorderLevel);
-            return <tr key={item.id}><td><div className="table-product-name"><span>{item.name.slice(0, 1)}</span><div><strong>{item.name}</strong><small>{item.category} · {item.unit}</small></div></div></td><td className="sku-cell">{item.sku}</td><td className="stock-cell">{Number(item.onHand).toFixed(3)}</td><td>{Number(item.reserved).toFixed(3)}</td><td className="stock-cell">{Number(item.available).toFixed(3)}</td><td>{Number(item.reorderLevel).toFixed(0)}</td><td><span className={`product-status ${low ? "status-low" : ""}`}><i /> {low ? "RESTOCK" : "IN STOCK"}</span></td></tr>;
+        <div className="products-toolbar"><div><div className="eyebrow">BRANCH BALANCES</div><h2>On-hand inventory</h2></div><label className="table-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search name or SKU" /></label></div>
+        <div className="inventory-controls">
+          <select aria-label="Filter inventory by stock status" value={stockFilter} onChange={(event) => setStockFilter(event.target.value)}>
+            <option value="">All stock statuses</option><option value="in_stock">In stock</option><option value="low_stock">Low stock</option><option value="out_of_stock">Out of stock</option>
+          </select>
+          <select aria-label="Sort inventory" value={inventorySort} onChange={(event) => setInventorySort(event.target.value)}>
+            <option value="name">Sort: Product name</option><option value="stock">Sort: Available stock</option><option value="updated">Sort: Last updated</option>
+          </select>
+          <button className="small-action" type="button" onClick={() => setInventoryDirection((current) => current === "asc" ? "desc" : "asc")}><ArrowUpDown size={14} /> {inventoryDirection === "asc" ? "Ascending" : "Descending"}</button>
+        </div>
+        {inventory.data?.items.length === 250 && <p className="inventory-result-limit">Showing at most 250 matching products. Narrow the search to find other items.</p>}
+        {inventory.isPending ? <LoadingRows /> : <div className="product-table-wrap"><table className="product-table inventory-table"><thead><tr><th>PRODUCT</th><th>SKU</th><th>CURRENT STOCK</th><th>RESERVED</th><th>AVAILABLE</th><th>REORDER LEVEL</th><th>STATUS</th><th>LAST UPDATED</th>{canAdjust && <th>ACTION</th>}</tr></thead><tbody>
+          {inventoryPageItems.map((item) => {
+            const available = Number(item.available);
+            const status = available <= 0 ? "OUT OF STOCK" : available <= Number(item.reorderLevel) ? "LOW STOCK" : "IN STOCK";
+            const statusClass = available <= 0 ? "status-out" : status === "LOW STOCK" ? "status-low" : "";
+            return <tr key={item.id}>
+              <td><div className="table-product-name">
+                {item.hasImage ? <img className="product-thumbnail" src={`/api/products/${item.id}/image`} alt="" loading="lazy" /> : <span>{item.name.slice(0, 1).toUpperCase()}</span>}
+                <div><strong>{item.name}</strong><small>{item.category} · {item.unit}</small></div>
+              </div></td>
+              <td className="sku-cell">{item.sku}</td><td className="stock-cell">{Number(item.onHand).toFixed(3)}</td>
+              <td>{Number(item.reserved).toFixed(3)}</td><td className="stock-cell">{available.toFixed(3)}</td>
+              <td>{Number(item.reorderLevel).toFixed(3)}</td>
+              <td><span className={`product-status ${statusClass}`}><i /> {status}</span></td>
+              <td>{new Date(item.updatedAt).toLocaleString("en-KE", { dateStyle: "medium", timeStyle: "short" })}</td>
+              {canAdjust && <td><button className="small-action" onClick={() => { setProductId(String(item.id)); adjustmentRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }); }}>Adjust</button></td>}
+            </tr>;
           })}
-        </tbody></table>{!inventory.data?.items.length && <EmptyState title="No inventory to show" detail="Register products to start tracking stock." />}</div>}
+        </tbody></table>{!inventoryPageItems.length && <EmptyState title="No inventory to show" detail="Adjust the search or status filter, or register products to start tracking stock." />}</div>}
+        {filteredInventory.length > inventoryPageSize && <div className="catalogue-pagination"><span>Showing {(inventoryPage - 1) * inventoryPageSize + 1}–{Math.min(inventoryPage * inventoryPageSize, filteredInventory.length)} of {filteredInventory.length}{inventory.data?.items.length === 250 ? " (first 250 results)" : ""}</span><div><button className="small-action" disabled={inventoryPage <= 1} onClick={() => setInventoryPage((current) => Math.max(1, current - 1))}>Previous</button><span>Page {inventoryPage} of {inventoryPageCount}</span><button className="small-action" disabled={inventoryPage >= inventoryPageCount} onClick={() => setInventoryPage((current) => current + 1)}>Next</button></div></div>}
       </section>
       {canAdjust && <section className="panel operation-table-panel">
         <div className="panel-heading"><div><div className="eyebrow">DATE-SENSITIVE STOCK</div><h2>Expiring batches</h2></div><span className="pending-pill">Next 90 days · expired first</span></div>
@@ -746,6 +1066,7 @@ function PurchasesPage({ user }: { user: User }) {
       setError("");
       void query.invalidateQueries({ queryKey: ["purchase-orders"] });
       void query.invalidateQueries({ queryKey: ["inventory"] });
+      void query.invalidateQueries({ queryKey: ["inventory-summary"] });
       void query.invalidateQueries({ queryKey: ["products"] });
     },
     onError: (reason) => setError(getErrorMessage(reason)),
@@ -985,6 +1306,7 @@ function SalesPage({ user }: { user: User }) {
       setQuantities({});
       void query.invalidateQueries({ queryKey: ["sales"] });
       void query.invalidateQueries({ queryKey: ["inventory"] });
+      void query.invalidateQueries({ queryKey: ["inventory-summary"] });
       void query.invalidateQueries({ queryKey: ["products"] });
       void query.invalidateQueries({ queryKey: ["refunds"] });
     },

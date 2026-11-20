@@ -40,9 +40,15 @@ The sidebar and frontend routes consume effective modules. Backend APIs independ
 
 - `GET /dashboard/summary` — today's completed sales, transaction count, active product count, low-stock items, and five recent sales for the user's branch.
 - `GET /reports/summary?from=YYYY-MM-DD&to=YYYY-MM-DD` — branch-scoped sales, refunds, cashier/product/category/payment breakdowns, expenses, purchase receipts, inventory valuation, and low stock. Admin, manager, or accountant only. Dates are inclusive; omitted dates default to the latest 30 calendar days, and ranges are limited to 366 days. The report screen supports CSV export.
-- `GET /products?search=milk` — up to 100 active products with branch-available stock. A search term may match product name, SKU, or barcode.
+- `GET /products?search=milk&page=1&pageSize=20&category=Dairy&stockStatus=low_stock&sort=stock&direction=asc` — active products with branch-available stock, server-side search/filter/sort, and pagination. `pageSize` is 1–100; `stockStatus` is `in_stock`, `low_stock`, or `out_of_stock`. Search terms match partial product names, SKUs, and barcodes.
+- `GET /products/categories` — categories used by active products.
 - `POST /products` — admin, manager, or inventory manager only. Registers a product, creates its category if needed, sets the branch's opening stock, and writes an opening stock movement and audit event.
 - `PATCH /products/:id` — update catalogue fields; same roles as creation. Set `{ "isActive": false }` to archive a product; archiving is refused while any branch has on-hand/reserved inventory or an open purchase order containing the product.
+- `GET /products/:id/image` — authenticated product/inventory module access; returns the private product image.
+- `PUT /products/:id/image` — admin, manager, or inventory manager only. Send a raw JPEG, PNG, or WebP body (`Content-Type: image/jpeg`, `image/png`, or `image/webp`), maximum 5 MB. Images are stored in MySQL by migration 011.
+- `DELETE /products/:id/image` — remove the stored image; same roles as product updates.
+
+The Products screen supports CSV import and export. CSV imports create products one at a time, preserve per-row failures in the result, and accept up to 1,000 rows per file. Required columns are `sku`, `name`, `category`, `unit`, and `sellingPrice`; optional columns include `barcode`, `purchasePrice`, `taxRate`, `reorderLevel`, and `openingStock`.
 
 ```json
 {
@@ -112,6 +118,7 @@ Passwords must be at least 12 characters and are hashed before storage. Managers
 ## Inventory
 
 - `GET /inventory?search=milk` — branch balances and recent stock movements.
+- `GET /inventory/summary` — exact active-product, available-stock, low/out-of-stock, and purchase-cost valuation totals for the user's branch. Valuation excludes products without a purchase cost; the response reports their count.
 - `POST /inventory/adjustments` — admin, manager, or inventory manager.
 - `GET /inventory/expiry?days=90` — batches already expired or due to expire within 1–365 days; defaults to 90.
 - `GET /inventory/transfer-branches` — destination branches other than the user's assigned branch.

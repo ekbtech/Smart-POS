@@ -166,12 +166,13 @@ async function writeAudit(
 export async function listInventory(branchId: number, search: string) {
   return query<Array<{
     id: number; sku: string; name: string; category: string | null; unit: string; on_hand: string;
-    reserved: string; available: string; reorder_level: string; cost: string | null; updated_at: Date;
+    reserved: string; available: string; reorder_level: string; cost: string | null; updated_at: Date; has_image: number;
   } & RowDataPacket>>(
     `SELECT p.id, p.sku, p.name, c.name AS category, p.unit, COALESCE(i.on_hand, 0) AS on_hand,
             COALESCE(i.reserved, 0) AS reserved,
             GREATEST(COALESCE(i.on_hand - i.reserved, 0) - COALESCE(expired.quantity, 0), 0) AS available,
-            p.reorder_level, p.purchase_price AS cost, COALESCE(i.updated_at, p.created_at) AS updated_at
+            p.reorder_level, p.purchase_price AS cost, COALESCE(i.updated_at, p.created_at) AS updated_at,
+            (p.image_mime_type IS NOT NULL) AS has_image
      FROM products p
      LEFT JOIN categories c ON c.id = p.category_id
      LEFT JOIN inventory i ON i.product_id = p.id AND i.branch_id = ?
@@ -185,6 +186,46 @@ export async function listInventory(branchId: number, search: string) {
      ORDER BY p.name LIMIT 250`,
     [branchId, branchId, search, search, search, search],
   );
+}
+
+export async function getInventorySummary(branchId: number) {
+  const [summary] = await query<Array<{
+    total_products: number;
+    total_stock: string;
+    low_stock_products: number;
+    out_of_stock_products: number;
+    stock_valuation: string;
+    uncosted_products: number;
+  } & RowDataPacket>>(
+    `SELECT COUNT(*) AS total_products,
+            COALESCE(SUM(available), 0) AS total_stock,
+            COALESCE(SUM(CASE WHEN available > 0 AND available <= reorder_level THEN 1 ELSE 0 END), 0) AS low_stock_products,
+            COALESCE(SUM(CASE WHEN available <= 0 THEN 1 ELSE 0 END), 0) AS out_of_stock_products,
+            COALESCE(SUM(available * COALESCE(purchase_price, 0)), 0) AS stock_valuation,
+            COALESCE(SUM(CASE WHEN available > 0 AND purchase_price IS NULL THEN 1 ELSE 0 END), 0) AS uncosted_products
+     FROM (
+       SELECT p.id, p.reorder_level, p.purchase_price,
+              GREATEST(COALESCE(i.on_hand - i.reserved, 0) - COALESCE(expired.quantity, 0), 0) AS available
+       FROM products p
+       LEFT JOIN inventory i ON i.product_id = p.id AND i.branch_id = ?
+       LEFT JOIN (
+         SELECT product_id, SUM(quantity_remaining) AS quantity
+         FROM inventory_batches
+         WHERE branch_id = ? AND expiry_date < CURDATE() AND quantity_remaining > 0
+         GROUP BY product_id
+       ) expired ON expired.product_id = p.id
+       WHERE p.is_active = TRUE
+     ) stock_summary`,
+    [branchId, branchId],
+  );
+  return {
+    totalProducts: Number(summary?.total_products ?? 0),
+    totalStock: summary?.total_stock ?? "0",
+    lowStockProducts: Number(summary?.low_stock_products ?? 0),
+    outOfStockProducts: Number(summary?.out_of_stock_products ?? 0),
+    stockValuation: summary?.stock_valuation ?? "0",
+    uncostedProducts: Number(summary?.uncosted_products ?? 0),
+  };
 }
 
 export async function adjustInventory(input: z.infer<typeof adjustmentSchema>, user: OperationUser) {

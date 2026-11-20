@@ -20,7 +20,7 @@ import { getBranchReport, parseReportRange } from "./reports.js";
 import {
   addCashMovement, adjustmentSchema, approvePurchaseOrder, cashMovementSchema, closeShift, closeShiftSchema,
   createCustomer, createExpense, createPurchaseOrder, createRefund, createSupplier, customerSchema,
-  decideExpense, expenseDecisionSchema, expenseSchema,   getActiveShift, getShiftCloseSummary, listCustomers, listExpenses,
+  decideExpense, expenseDecisionSchema, expenseSchema, getActiveShift, getInventorySummary, getShiftCloseSummary, listCustomers, listExpenses,
   getPurchaseOrder, getStockMovements, listInventory, listPurchaseOrders, listRefunds, listSuppliers, openShift,
   openShiftSchema, purchaseOrderSchema, receivePurchaseOrder, receiveSchema, refundSchema, adjustInventory,
   supplierSchema, completeStockTake, createStockTake, getStockTake, listExpiryBatches, listStockTakes,
@@ -77,6 +77,32 @@ function positiveId(value: string | string[] | undefined): number | undefined {
   if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) return undefined;
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+function positiveQueryInteger(value: unknown, fallback: number, maximum: number): number | undefined {
+  if (value === undefined) return fallback;
+  if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed <= maximum ? parsed : undefined;
+}
+
+function requireAnyModule(...moduleIds: string[]): express.RequestHandler {
+  return (req, res, next) => {
+    if (!moduleIds.some((moduleId) => req.user?.modules?.includes(moduleId))) {
+      res.status(403).json({ error: "You do not have permission to access this module." });
+      return;
+    }
+    next();
+  };
+}
+
+function matchesImageSignature(data: Buffer, mimeType: string): boolean {
+  if (mimeType === "image/png") return data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  if (mimeType === "image/jpeg") return data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff;
+  return mimeType === "image/webp"
+    && data.length >= 12
+    && data.toString("ascii", 0, 4) === "RIFF"
+    && data.toString("ascii", 8, 12) === "WEBP";
 }
 
 function handleOperation(
@@ -234,12 +260,22 @@ app.patch("/api/staff/:id/status", authenticate, requireRoles("admin"), (req, re
 app.get("/api/products", authenticate, requireModule("products"), async (req, res, next) => {
   try {
     const search = typeof req.query.search === "string" ? req.query.search.trim().slice(0, 100) : "";
-    const products = await query<Array<{
-      id: number; sku: string; name: string; category_name: string | null; unit: string; tax_rate: string; reorder_level: string;
-      selling_price: string; purchase_price: string | null; stock: string; barcode: string | null;
-    } & import("mysql2").RowDataPacket>>(
-    `SELECT p.id, p.sku, p.name, c.name AS category_name, p.unit, p.selling_price, p.purchase_price, p.tax_rate, p.reorder_level,
-              GREATEST(COALESCE(i.on_hand - i.reserved, 0) - COALESCE(expired.quantity, 0), 0) AS stock, p.barcode
+    const category = typeof req.query.category === "string" ? req.query.category.trim().slice(0, 100) : "";
+    const page = positiveQueryInteger(req.query.page, 1, 1_000_000);
+    const pageSize = positiveQueryInteger(req.query.pageSize, 100, 100);
+    const sort = typeof req.query.sort === "string" ? req.query.sort : "name";
+    const direction = typeof req.query.direction === "string" ? req.query.direction : "asc";
+    const stockStatus = typeof req.query.stockStatus === "string" ? req.query.stockStatus : "";
+    if (!page || !pageSize || !["name", "price", "stock"].includes(sort)
+      || !["asc", "desc"].includes(direction)
+      || !["", "in_stock", "low_stock", "out_of_stock"].includes(stockStatus)) {
+      res.status(400).json({ error: "Invalid product list filters." });
+      return;
+    }
+    const baseSql = `SELECT p.id, p.sku, p.name, COALESCE(c.name, 'Uncategorised') AS category_name,
+              p.unit, p.selling_price, p.purchase_price, p.tax_rate, p.reorder_level,
+              GREATEST(COALESCE(i.on_hand - i.reserved, 0) - COALESCE(expired.quantity, 0), 0) AS stock,
+              p.barcode, (p.image_mime_type IS NOT NULL) AS has_image
        FROM products p LEFT JOIN categories c ON c.id = p.category_id
        LEFT JOIN inventory i ON i.product_id = p.id AND i.branch_id = ?
        LEFT JOIN (
@@ -248,16 +284,39 @@ app.get("/api/products", authenticate, requireModule("products"), async (req, re
          WHERE branch_id = ? AND expiry_date < CURDATE() AND quantity_remaining > 0
          GROUP BY product_id
        ) expired ON expired.product_id = p.id
-       WHERE p.is_active = TRUE AND (? = '' OR p.name LIKE CONCAT('%', ?, '%') OR p.sku = ? OR p.barcode = ?)
-       ORDER BY p.name LIMIT 100`,
-      [req.user!.branchId, req.user!.branchId, search, search, search, search],
+       WHERE p.is_active = TRUE`;
+    const filters = [
+      "(? = '' OR catalogue.name LIKE CONCAT('%', ?, '%') OR catalogue.sku LIKE CONCAT('%', ?, '%') OR catalogue.barcode LIKE CONCAT('%', ?, '%'))",
+      "(? = '' OR catalogue.category_name = ?)",
+    ];
+    const filterValues: Array<string | number> = [search, search, search, search, category, category];
+    if (stockStatus === "in_stock") filters.push("catalogue.stock > catalogue.reorder_level");
+    if (stockStatus === "low_stock") filters.push("catalogue.stock > 0 AND catalogue.stock <= catalogue.reorder_level");
+    if (stockStatus === "out_of_stock") filters.push("catalogue.stock <= 0");
+    const where = filters.join(" AND ");
+    const baseValues = [req.user!.branchId, req.user!.branchId];
+    const [countRows] = await pool.execute<Array<{ total: number } & import("mysql2").RowDataPacket>>(
+      `SELECT COUNT(*) AS total FROM (${baseSql}) catalogue WHERE ${where}`,
+      [...baseValues, ...filterValues],
+    );
+    const orderBy = sort === "price" ? "catalogue.selling_price"
+      : sort === "stock" ? "catalogue.stock" : "catalogue.name";
+    const products = await query<Array<{
+      id: number; sku: string; name: string; category_name: string | null; unit: string; tax_rate: string; reorder_level: string;
+      selling_price: string; purchase_price: string | null; stock: string; barcode: string | null; has_image: number;
+    } & import("mysql2").RowDataPacket>>(
+      `SELECT * FROM (${baseSql}) catalogue
+       WHERE ${where}
+       ORDER BY ${orderBy} ${direction.toUpperCase()}, catalogue.name ASC
+       LIMIT ? OFFSET ?`,
+      [...baseValues, ...filterValues, pageSize, (page - 1) * pageSize],
     );
     res.json({
       products: products.map((product) => ({
         id: product.id,
         sku: product.sku,
         name: product.name,
-        category: product.category_name ?? "Uncategorised",
+        category: product.category_name,
         unit: product.unit,
         sellingPrice: product.selling_price,
         purchasePrice: product.purchase_price,
@@ -265,8 +324,48 @@ app.get("/api/products", authenticate, requireModule("products"), async (req, re
         reorderLevel: product.reorder_level,
         stock: String(product.stock),
         barcode: product.barcode,
+        hasImage: Boolean(product.has_image),
       })),
+      pagination: {
+        page,
+        pageSize,
+        total: Number(countRows[0]?.total ?? 0),
+        totalPages: Math.ceil(Number(countRows[0]?.total ?? 0) / pageSize),
+      },
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/products/categories", authenticate, requireModule("products"), async (_req, res, next) => {
+  try {
+    const categories = await query<Array<{ name: string } & import("mysql2").RowDataPacket>>(
+      `SELECT DISTINCT c.name FROM categories c
+       JOIN products p ON p.category_id = c.id
+       WHERE p.is_active = TRUE ORDER BY c.name`,
+    );
+    res.json({ categories: categories.map((item) => item.name) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/products/:id/image", authenticate, requireAnyModule("products", "inventory"), async (req, res, next) => {
+  const id = positiveId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid product ID." }); return; }
+  try {
+    const [rows] = await pool.execute<Array<{ image_data: Buffer; image_mime_type: string } & import("mysql2").RowDataPacket>>(
+      "SELECT image_data, image_mime_type FROM products WHERE id = ? AND is_active = TRUE",
+      [id],
+    );
+    if (!rows[0]?.image_data || !rows[0].image_mime_type) {
+      res.status(404).json({ error: "Product image not found." });
+      return;
+    }
+    res.setHeader("Content-Type", rows[0].image_mime_type);
+    res.setHeader("Cache-Control", "private, no-store");
+    res.send(rows[0].image_data);
   } catch (error) {
     next(error);
   }
@@ -295,6 +394,68 @@ app.patch("/api/products/:id", authenticate, requireRoles("admin", "manager", "i
   }
 });
 
+app.put(
+  "/api/products/:id/image",
+  authenticate,
+  requireRoles("admin", "manager", "inventory_manager"),
+  express.raw({ type: ["image/jpeg", "image/png", "image/webp"], limit: "5mb" }),
+  async (req, res, next) => {
+    const id = positiveId(req.params.id);
+    if (!id) { res.status(400).json({ error: "Invalid product ID." }); return; }
+    const mimeType = req.get("content-type")?.split(";")[0].trim().toLowerCase() ?? "";
+    if (!["image/jpeg", "image/png", "image/webp"].includes(mimeType)
+      || !Buffer.isBuffer(req.body)
+      || !req.body.length
+      || !matchesImageSignature(req.body, mimeType)) {
+      res.status(415).json({ error: "Upload a valid JPEG, PNG, or WebP image." });
+      return;
+    }
+    try {
+      const [products] = await pool.execute<Array<{ id: number } & import("mysql2").RowDataPacket>>(
+        "SELECT id FROM products WHERE id = ? LIMIT 1",
+        [id],
+      );
+      if (!products[0]) { res.status(404).json({ error: "Product not found." }); return; }
+      await pool.execute(
+        "UPDATE products SET image_data = ?, image_mime_type = ? WHERE id = ?",
+        [req.body, mimeType, id],
+      );
+      await pool.execute(
+        "INSERT INTO audit_logs (user_id, action, entity_type, entity_id) VALUES (?, 'product.image_updated', 'product', ?)",
+        [req.user!.id, String(id)],
+      );
+      res.json({ hasImage: true });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.delete("/api/products/:id/image", authenticate, requireRoles("admin", "manager", "inventory_manager"), async (req, res, next) => {
+  const id = positiveId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid product ID." }); return; }
+  try {
+    const [result] = await pool.execute(
+      "UPDATE products SET image_data = NULL, image_mime_type = NULL WHERE id = ?",
+      [id],
+    );
+    if ((result as import("mysql2").ResultSetHeader).affectedRows === 0) {
+      const [products] = await pool.execute<Array<{ id: number } & import("mysql2").RowDataPacket>>(
+        "SELECT id FROM products WHERE id = ? LIMIT 1",
+        [id],
+      );
+      if (!products[0]) { res.status(404).json({ error: "Product not found." }); return; }
+    }
+    await pool.execute(
+      "INSERT INTO audit_logs (user_id, action, entity_type, entity_id) VALUES (?, 'product.image_removed', 'product', ?)",
+      [req.user!.id, String(id)],
+    );
+    res.json({ hasImage: false });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/inventory", authenticate, requireModule("inventory"), async (req, res, next) => {
   try {
     const search = typeof req.query.search === "string" ? req.query.search.trim().slice(0, 100) : "";
@@ -307,6 +468,7 @@ app.get("/api/inventory", authenticate, requireModule("inventory"), async (req, 
         id: item.id, sku: item.sku, name: item.name, category: item.category ?? "Uncategorised",
         unit: item.unit, onHand: item.on_hand, reserved: item.reserved, available: item.available,
         reorderLevel: item.reorder_level, updatedAt: item.updated_at.toISOString(),
+        cost: item.cost, hasImage: Boolean(item.has_image),
       })),
       movements: movements.map((movement) => ({
         id: movement.id, product: movement.product_name, sku: movement.sku, type: movement.movement_type,
@@ -314,6 +476,14 @@ app.get("/api/inventory", authenticate, requireModule("inventory"), async (req, 
         createdAt: movement.created_at.toISOString(),
       })),
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/inventory/summary", authenticate, requireModule("inventory"), async (req, res, next) => {
+  try {
+    res.json({ summary: await getInventorySummary(req.user!.branchId) });
   } catch (error) {
     next(error);
   }

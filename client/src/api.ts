@@ -30,6 +30,7 @@ export type Product = {
   reorderLevel: string;
   stock: string;
   barcode: string | null;
+  hasImage: boolean;
 };
 
 export type DashboardSummary = {
