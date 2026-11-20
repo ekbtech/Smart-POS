@@ -1218,6 +1218,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const scannerRef = useRef<HTMLInputElement>(null);
   const saleTableRef = useRef<HTMLDivElement>(null);
   const lineIdRef = useRef(0);
+  const isAddingProductRef = useRef(false);
   const idempotencyRef = useRef<string | null>(null);
   useEffect(() => {
     window.requestAnimationFrame(() => scannerRef.current?.focus());
@@ -1324,17 +1325,17 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const addProduct = (product: Product) => {
     if (Number(product.stock) < 1) {
       setCheckoutError(`${product.name} is out of stock.`);
-      return;
+      return false;
     }
     const quantityInCart = cart.reduce((sum, item) => item.product.id === product.id ? sum + item.quantity : sum, 0);
     if (quantityInCart >= Math.floor(Number(product.stock))) {
       setCheckoutError(`No more stock is available for ${product.name}.`);
-      return;
+      return false;
     }
     setCheckoutError("");
-    setCart((current) => {
-      return [...current, { lineId: ++lineIdRef.current, product, quantity: 1 }];
-    });
+    const lineId = ++lineIdRef.current;
+    setCart((current) => [...current, { lineId, product, quantity: 1 }]);
+    return true;
   };
   const scan = async (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "ArrowDown") {
@@ -1356,27 +1357,35 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     }
     if (event.key !== "Enter") return;
     event.preventDefault();
+    event.stopPropagation();
+    if (isAddingProductRef.current) return;
     const code = search.trim();
     if (!code) {
       scannerRef.current?.focus();
       return;
     }
+    isAddingProductRef.current = true;
     try {
       const { data } = await api.get<{ products: Product[] }>("/products", { params: { search: code } });
       const exact = data.products.find((product) => product.barcode === code || product.sku === code);
       const match = exact ?? data.products[selectedSearchIndex] ?? data.products[0];
       if (match) {
-        addProduct(match);
-        setSearch("");
-        setSelectedSearchIndex(0);
+        if (addProduct(match)) {
+          setSearch("");
+          setSelectedSearchIndex(0);
+        }
       } else {
         setCheckoutError(`No product found for “${code}”.`);
         setSearch("");
       }
     } catch (error) {
       setCheckoutError(getErrorMessage(error));
+    } finally {
+      window.requestAnimationFrame(() => {
+        scannerRef.current?.focus({ preventScroll: true });
+        isAddingProductRef.current = false;
+      });
     }
-    window.requestAnimationFrame(() => scannerRef.current?.focus());
   };
   const adjust = (lineId: number, amount: number) => setCart((current) => current
     .map((item) => item.lineId === lineId
@@ -1534,28 +1543,6 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
             <table className="pos-sale-table">
               <thead><tr><th>No.</th><th>Product code</th><th>Product name</th><th>Qty</th><th>Unit price</th><th>Total</th><th>Action</th></tr></thead>
               <tbody>
-                <tr className="pos-search-row">
-                  <td className="pos-search-cell" colSpan={7}>
-                    <input
-                      ref={scannerRef}
-                      className="pos-search-input"
-                      aria-label="Scan barcode or search products"
-                      autoComplete="off"
-                      autoFocus
-                      spellCheck={false}
-                      value={search}
-                      onKeyDown={scan}
-                      onChange={(event) => { setSearch(event.target.value); setSelectedSearchIndex(0); }}
-                    />
-                    {search.trim() && <div className="pos-search-results">
-                      {(productsQuery.data ?? []).slice(0, 8).map((product, index) => <button key={product.id} className={index === selectedSearchIndex ? "selected" : ""} onMouseEnter={() => setSelectedSearchIndex(index)} onClick={() => { addProduct(product); setSearch(""); setSelectedSearchIndex(0); window.requestAnimationFrame(() => scannerRef.current?.focus()); }}>
-                        <span><strong>{product.name}</strong><small>{product.sku} · {product.category}</small></span>
-                        <b>{money(product.sellingPrice)}</b>
-                      </button>)}
-                      {!productsQuery.isPending && !productsQuery.data?.length && <div className="pos-search-empty">No matching product.</div>}
-                    </div>}
-                  </td>
-                </tr>
                 {cart.map(({ lineId, product, quantity }, index) => <tr className="pos-product-row" key={lineId}>
                   <td>{index + 1}</td><td className="pos-product-code">{product.sku}</td><td className="pos-product-name">{product.name}</td>
                   <td><div className="pos-table-qty"><button onClick={() => adjust(lineId, -1)}>−</button><input value={quantity} onChange={(event) => {
@@ -1566,7 +1553,34 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
                   <td>{money(lineTotalCents({ lineId, product, quantity }) / 100)}</td>
                   <td><button className="pos-row-remove" onClick={() => setCart((current) => current.filter((item) => item.lineId !== lineId))}><X size={14} /></button></td>
                 </tr>)}
-                {!cart.length && <tr className="pos-empty-row"><td colSpan={7}>Scan barcode or enter a product code to start a sale.</td></tr>}
+                <tr className="pos-search-row">
+                  <td className="pos-search-cell" colSpan={7}>
+                    <input
+                      ref={scannerRef}
+                      className="pos-search-input"
+                      aria-label={`Product entry row ${cart.length + 1}; scan barcode or search products`}
+                      autoComplete="off"
+                      autoFocus
+                      spellCheck={false}
+                      value={search}
+                      onKeyDown={scan}
+                      onChange={(event) => { setSearch(event.target.value); setSelectedSearchIndex(0); }}
+                    />
+                    {search.trim() && <div className="pos-search-results">
+                      {(productsQuery.data ?? []).slice(0, 8).map((product, index) => <button key={product.id} className={index === selectedSearchIndex ? "selected" : ""} onMouseEnter={() => setSelectedSearchIndex(index)} onClick={() => {
+                        if (addProduct(product)) {
+                          setSearch("");
+                          setSelectedSearchIndex(0);
+                          window.requestAnimationFrame(() => scannerRef.current?.focus({ preventScroll: true }));
+                        }
+                      }}>
+                        <span><strong>{product.name}</strong><small>{product.sku} · {product.category}</small></span>
+                        <b>{money(product.sellingPrice)}</b>
+                      </button>)}
+                      {!productsQuery.isPending && !productsQuery.data?.length && <div className="pos-search-empty">No matching product.</div>}
+                    </div>}
+                  </td>
+                </tr>
               </tbody>
             </table>
           </div>

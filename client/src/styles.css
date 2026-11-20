@@ -257,7 +257,7 @@ a { color: inherit; text-decoration: none; }
 .pos-sale-table th:nth-child(4) { width: 12%; }
 .pos-sale-table th:nth-child(5), .pos-sale-table th:nth-child(6) { width: 14%; }
 .pos-sale-table th:nth-child(7) { width: 8%; }
-.pos-search-row { position: sticky; z-index: 2; top: 36px; }
+.pos-search-row { background: #fff; }
 .pos-search-cell { position: relative; min-width: 180px; padding: 5px 8px !important; background: #fff; }
 .pos-search-input { display: block; width: 100%; height: 36px; padding: 0 8px; border: 1px solid #dfe5df; border-radius: 3px; outline: 0; background: #fff; color: #2c392f; font: inherit; }
 .pos-search-input:focus { border-color: #76a37e; box-shadow: 0 0 0 2px #edf5ed; }
