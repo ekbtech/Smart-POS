@@ -17,6 +17,10 @@ const secret = getJwtSecret();
 const sessionCookie = "smart_pos_session";
 const posSessionCookie = "smart_pos_pos_session";
 const ttl = process.env.JWT_TTL ?? "8h";
+const landingModuleIds = new Set([
+  "dashboard", "pos", "sales", "products", "inventory", "purchases", "suppliers",
+  "customers", "expenses", "shifts", "reports",
+]);
 
 type UserRow = RowDataPacket & {
   id: number;
@@ -74,6 +78,10 @@ export async function login(req: Request, res: Response): Promise<void> {
   );
   const user = users[0];
   if (!user || !user.is_active) {
+    await execute(
+      "INSERT INTO login_history (user_id, identifier, success, ip_address, user_agent) VALUES (?, ?, FALSE, ?, ?)",
+      [user?.id ?? null, identifier, req.ip ?? null, req.get("user-agent")?.slice(0, 500) ?? null],
+    );
     res.status(401).json({ error: "Username/email or password is incorrect." });
     return;
   }
@@ -83,14 +91,26 @@ export async function login(req: Request, res: Response): Promise<void> {
   );
   const roleNames = roles.map((role) => role.name);
   if (isEmail && !roleNames.includes("admin")) {
+    await execute(
+      "INSERT INTO login_history (user_id, identifier, success, ip_address, user_agent) VALUES (?, ?, FALSE, ?, ?)",
+      [user.id, identifier, req.ip ?? null, req.get("user-agent")?.slice(0, 500) ?? null],
+    );
     res.status(403).json({ error: "Email login is available only to administrator accounts." });
     return;
   }
   if (!isEmail && roleNames.includes("admin")) {
+    await execute(
+      "INSERT INTO login_history (user_id, identifier, success, ip_address, user_agent) VALUES (?, ?, FALSE, ?, ?)",
+      [user.id, identifier, req.ip ?? null, req.get("user-agent")?.slice(0, 500) ?? null],
+    );
     res.status(403).json({ error: "Administrator accounts must sign in with their email address." });
     return;
   }
   if (user.main_locked_until && new Date(user.main_locked_until).getTime() > Date.now()) {
+    await execute(
+      "INSERT INTO login_history (user_id, identifier, success, ip_address, user_agent) VALUES (?, ?, FALSE, ?, ?)",
+      [user.id, identifier, req.ip ?? null, req.get("user-agent")?.slice(0, 500) ?? null],
+    );
     res.status(423).json({ error: "This account is temporarily locked. Try again later." });
     return;
   }
@@ -134,9 +154,14 @@ export async function login(req: Request, res: Response): Promise<void> {
     [user.id],
   );
   const modules = new Set(rolePermissions.map((row) => row.module_id));
-  for (const override of userOverrides) {
-    if (override.allowed) modules.add(override.module_id);
-    else modules.delete(override.module_id);
+  if (roleNames.includes("admin")) {
+    const [allModules] = await pool.execute<Array<RowDataPacket & { id: string }>>("SELECT id FROM modules");
+    for (const module of allModules) modules.add(module.id);
+  } else {
+    for (const override of userOverrides) {
+      if (override.allowed) modules.add(override.module_id);
+      else modules.delete(override.module_id);
+    }
   }
   const moduleIds = [...modules];
   const sessionId = randomUUID();
@@ -166,9 +191,10 @@ export async function login(req: Request, res: Response): Promise<void> {
       : roleNames.includes("procurement_officer") ? "/purchases"
         : roleNames.includes("accountant") ? "/reports" : "/";
   const defaultLanding = availableModules.find((module) =>
-    module.route === user.default_landing && moduleIds.includes(module.id))?.route
-    ?? availableModules.find((module) => module.route === landingByRole && moduleIds.includes(module.id))?.route
-    ?? availableModules.find((module) => moduleIds.includes(module.id))?.route
+    landingModuleIds.has(module.id) && module.route === user.default_landing && moduleIds.includes(module.id))?.route
+    ?? availableModules.find((module) =>
+      landingModuleIds.has(module.id) && module.route === landingByRole && moduleIds.includes(module.id))?.route
+    ?? availableModules.find((module) => landingModuleIds.has(module.id) && moduleIds.includes(module.id))?.route
     ?? null;
   res.json({
     user: {
@@ -218,9 +244,15 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
       [rows[0].id],
     );
     const modules = new Set(rolePermissions.map((row) => row.module_id));
-    for (const override of userOverrides) {
-      if (override.allowed) modules.add(override.module_id);
-      else modules.delete(override.module_id);
+    const roleNames = roles.map((role) => role.name);
+    if (roleNames.includes("admin")) {
+      const [allModules] = await pool.execute<Array<RowDataPacket & { id: string }>>("SELECT id FROM modules");
+      for (const module of allModules) modules.add(module.id);
+    } else {
+      for (const override of userOverrides) {
+        if (override.allowed) modules.add(override.module_id);
+        else modules.delete(override.module_id);
+      }
     }
     const [profileRows] = await pool.execute<Array<UserRow & RowDataPacket>>(
       "SELECT username, default_landing, must_change_password, pos_username FROM users WHERE id=? LIMIT 1",
@@ -232,7 +264,7 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
       name: rows[0].name,
       email: rows[0].email,
       branchId: rows[0].branch_id,
-      roles: roles.map((role) => role.name),
+      roles: roleNames,
       modules: [...modules],
       defaultLanding: profile?.default_landing ?? undefined,
       posUsername: profile?.pos_username ?? undefined,
@@ -250,41 +282,44 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
   } catch (error) {
     next(error);
   }
+}
 
-  export async function changePassword(req: Request, res: Response): Promise<void> {
-    const input = changePasswordSchema.parse(req.body);
-    const user = req.user;
-    if (!user || !req.sessionId) {
-      res.status(401).json({ error: "Authentication required." });
-      return;
-    }
-    if (input.currentPassword === input.newPassword) {
-      res.status(400).json({ error: "Choose a new password different from your current password." });
-      return;
-    }
-    const [users] = await pool.execute<Array<RowDataPacket & {
-      password_hash: string; pos_password_hash: string | null;
-    }>>("SELECT password_hash, pos_password_hash FROM users WHERE id=? LIMIT 1", [user.id]);
-    if (!users[0] || !(await bcrypt.compare(input.currentPassword, users[0].password_hash))) {
-      res.status(400).json({ error: "Current password is incorrect." });
-      return;
-    }
-    const passwordHash = await bcrypt.hash(input.newPassword, 12);
-    await withTransaction(async (connection) => {
-      await connection.execute(
-        "UPDATE users SET password_hash=?, pos_password_hash=?, must_change_password=FALSE, main_failed_attempts=0, main_locked_until=NULL WHERE id=?",
-        [passwordHash, passwordHash, user.id],
-      );
-      await connection.execute("DELETE FROM auth_sessions WHERE user_id=? AND id<>?", [user.id, req.sessionId]);
-      await connection.execute("DELETE FROM pos_sessions WHERE user_id=?", [user.id]);
-      await connection.execute(
-        "INSERT INTO audit_logs (user_id, action, entity_type, entity_id) VALUES (?, 'auth.password_changed', 'user', ?)",
-        [user.id, String(user.id)],
-      );
-    });
-    user.mustChangePassword = false;
-    res.json({ changed: true });
+export async function changePassword(req: Request, res: Response): Promise<void> {
+  const input = changePasswordSchema.parse(req.body);
+  const user = req.user;
+  if (!user || !req.sessionId) {
+    res.status(401).json({ error: "Authentication required." });
+    return;
   }
+  if (input.currentPassword === input.newPassword) {
+    res.status(400).json({ error: "Choose a new password different from your current password." });
+    return;
+  }
+  const [users] = await pool.execute<Array<RowDataPacket & {
+    password_hash: string; pos_password_hash: string | null; must_change_password: number;
+  }>>("SELECT password_hash, pos_password_hash, must_change_password FROM users WHERE id=? LIMIT 1", [user.id]);
+  if (!users[0] || !(await bcrypt.compare(input.currentPassword, users[0].password_hash))) {
+    res.status(400).json({ error: "Current password is incorrect." });
+    return;
+  }
+  const passwordHash = await bcrypt.hash(input.newPassword, 12);
+  const sessionId = req.sessionId;
+  await withTransaction(async (connection) => {
+    await connection.execute(
+      `UPDATE users SET password_hash=?,
+       pos_password_hash=IF(must_change_password=TRUE OR pos_password_hash IS NULL, ?, pos_password_hash),
+       must_change_password=FALSE, main_failed_attempts=0, main_locked_until=NULL WHERE id=?`,
+      [passwordHash, passwordHash, user.id],
+    );
+    await connection.execute("DELETE FROM auth_sessions WHERE user_id=? AND id<>?", [user.id, sessionId]);
+    await connection.execute("DELETE FROM pos_sessions WHERE user_id=?", [user.id]);
+    await connection.execute(
+      "INSERT INTO audit_logs (user_id, action, entity_type, entity_id) VALUES (?, 'auth.password_changed', 'user', ?)",
+      [user.id, String(user.id)],
+    );
+  });
+  user.mustChangePassword = false;
+  res.json({ changed: true });
 }
 
 export function requireRoles(...allowed: string[]) {
@@ -329,7 +364,7 @@ export async function posLogin(req: Request, res: Response): Promise<void> {
     pos_password_hash: string | null; pos_failed_attempts: number; pos_locked_until: Date | null;
   }>>(
     `SELECT id, name, email, branch_id, password_hash, pos_password_hash, is_active,
-            pos_failed_attempts, pos_locked_until
+            must_change_password, pos_failed_attempts, pos_locked_until
      FROM users WHERE pos_username = ? LIMIT 1`,
     [input.username.toLowerCase()],
   );
@@ -362,9 +397,14 @@ export async function posLogin(req: Request, res: Response): Promise<void> {
     [user.id],
   );
   const modules = new Set(rolePermissions.map((row) => row.module_id));
-  for (const override of userOverrides) {
-    if (override.allowed) modules.add(override.module_id);
-    else modules.delete(override.module_id);
+  if (roleNames.includes("admin")) {
+    const [allModules] = await pool.execute<Array<RowDataPacket & { id: string }>>("SELECT id FROM modules");
+    for (const module of allModules) modules.add(module.id);
+  } else {
+    for (const override of userOverrides) {
+      if (override.allowed) modules.add(override.module_id);
+      else modules.delete(override.module_id);
+    }
   }
   if (!modules.has("pos")) {
     res.status(403).json({ error: "This account does not have permission to access POS." });
@@ -379,6 +419,10 @@ export async function posLogin(req: Request, res: Response): Promise<void> {
         [attempts, user.id],
       );
       res.status(423).json({ error: "Too many failed attempts. This POS account is locked for 15 minutes." });
+      return;
+    }
+    if (user.must_change_password) {
+      res.status(403).json({ error: "Sign in to the staff workspace and change your temporary password before opening POS." });
       return;
     }
     await execute("UPDATE users SET pos_failed_attempts = ? WHERE id = ?", [attempts, user.id]);
@@ -405,14 +449,18 @@ export async function authenticatePos(req: Request, res: Response, next: NextFun
     const sessionId = req.cookies?.[posSessionCookie];
     if (!sessionId) { res.status(401).json({ error: "POS authentication required." }); return; }
     const rows = await query<Array<{
-      id: number; name: string; email: string; branch_id: number; pos_username: string;
+      id: number; name: string; email: string; branch_id: number; pos_username: string; must_change_password: number;
     } & RowDataPacket>>(
-      `SELECT u.id, u.name, u.email, u.branch_id, u.pos_username
+      `SELECT u.id, u.name, u.email, u.branch_id, u.pos_username, u.must_change_password
        FROM users u JOIN pos_sessions s ON s.user_id = u.id
        WHERE s.id = ? AND u.is_active = TRUE AND s.expires_at > NOW() LIMIT 1`,
       [sessionId],
     );
     if (!rows[0]) { res.status(401).json({ error: "POS session expired. Authenticate again." }); return; }
+    if (rows[0].must_change_password) {
+      res.status(403).json({ error: "Change your temporary password before using POS." });
+      return;
+    }
     const roles = await query<Array<{ name: string } & RowDataPacket>>(
       "SELECT r.name FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = ?",
       [rows[0].id],

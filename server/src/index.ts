@@ -17,7 +17,8 @@ import {
 import { HttpError } from "./errors.js";
 import {
   canAssignStaffRole, createStaff, createStaffSchema, listBranches, listDepartments, listRolePermissions,
-  listStaff, listStaffActivity, modulePermissionsSchema, resetStaffPassword, resetStaffPasswordSchema,
+  listStaff, listStaffActivity, manageableModuleIds, modulePermissionOverridesSchema, modulePermissionsSchema,
+  resetStaffPassword, resetStaffPasswordSchema,
   setStaffStatus, staffStatusSchema, updateRolePermissions, updateStaff, updateStaffSchema,
 } from "./staff.js";
 import { productSchema, registerProduct, updateProduct, updateProductSchema } from "./products.js";
@@ -133,7 +134,9 @@ app.post("/api/pos/logout", authenticate, authenticatePos, (req, res, next) => v
 app.get("/api/access/modules", authenticate, requireRoles("admin"), async (_req, res, next) => {
   try {
     res.json({ modules: await query<Array<{ id: string; name: string; route: string; sort_order: number } & import("mysql2").RowDataPacket>>(
-      "SELECT id, name, route, sort_order FROM modules ORDER BY sort_order",
+      `SELECT id, name, route, sort_order FROM modules
+       WHERE id IN (${[...manageableModuleIds].map(() => "?").join(",")}) ORDER BY sort_order`,
+      [...manageableModuleIds],
     ).then((rows) => rows.map((row) => ({
       id: row.id, name: row.name, route: row.route, sortOrder: row.sort_order,
     }))) });
@@ -153,7 +156,8 @@ app.get("/api/access/roles", authenticate, requireRoles("admin"), async (_req, r
 app.put("/api/access/roles/:role", authenticate, requireRoles("admin"), (req, res, next) => {
   const permissions = modulePermissionsSchema.safeParse(req.body.permissions);
   if (!permissions.success) { res.status(400).json({ error: "Provide valid role module permissions." }); return; }
-  void updateRolePermissions(req.params.role ?? "", permissions.data, req.user!).then(
+  const roleName = Array.isArray(req.params.role) ? req.params.role[0] ?? "" : req.params.role ?? "";
+  void updateRolePermissions(roleName, permissions.data, req.user!).then(
     (result) => res.json(result),
     next,
   );
@@ -183,7 +187,7 @@ app.get("/api/access/users/:id", authenticate, requireRoles("admin"), async (req
       ),
     ]);
     if (!users[0]) { res.status(404).json({ error: "User not found." }); return; }
-    const [roles] = await query<Array<{ name: string } & import("mysql2").RowDataPacket>>(
+    const roles = await query<Array<{ name: string } & import("mysql2").RowDataPacket>>(
       "SELECT r.name FROM roles r JOIN user_roles ur ON ur.role_id=r.id WHERE ur.user_id=?",
       [id],
     );
@@ -206,7 +210,7 @@ app.put("/api/access/users/:id", authenticate, requireRoles("admin"), async (req
   const defaultLanding = req.body.defaultLanding === null
     ? null
     : typeof req.body.defaultLanding === "string" ? req.body.defaultLanding : undefined;
-  const permissions = modulePermissionsSchema.safeParse(req.body.permissions);
+  const permissions = modulePermissionOverridesSchema.safeParse(req.body.permissions);
   if (defaultLanding === undefined || !permissions.success) {
     res.status(400).json({ error: "Provide a default landing page and valid module permission overrides." });
     return;
@@ -443,7 +447,7 @@ app.get("/api/products/:id/image", authenticate, requireAnyModule("products", "i
   }
 });
 
-app.post("/api/products", authenticate, requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
+app.post("/api/products", authenticate, requireModule("products"), requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
   try {
     const input = productSchema.parse(req.body);
     void registerProduct(input, req.user!).then(
@@ -455,7 +459,7 @@ app.post("/api/products", authenticate, requireRoles("admin", "manager", "invent
   }
 });
 
-app.patch("/api/products/:id", authenticate, requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
+app.patch("/api/products/:id", authenticate, requireModule("products"), requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid product ID." }); return; }
   try {
@@ -469,6 +473,7 @@ app.patch("/api/products/:id", authenticate, requireRoles("admin", "manager", "i
 app.put(
   "/api/products/:id/image",
   authenticate,
+  requireAnyModule("products", "inventory"),
   requireRoles("admin", "manager", "inventory_manager"),
   express.raw({ type: ["image/jpeg", "image/png", "image/webp"], limit: "5mb" }),
   async (req, res, next) => {
@@ -503,7 +508,7 @@ app.put(
   },
 );
 
-app.delete("/api/products/:id/image", authenticate, requireRoles("admin", "manager", "inventory_manager"), async (req, res, next) => {
+app.delete("/api/products/:id/image", authenticate, requireAnyModule("products", "inventory"), requireRoles("admin", "manager", "inventory_manager"), async (req, res, next) => {
   const id = positiveId(req.params.id);
   if (!id) { res.status(400).json({ error: "Invalid product ID." }); return; }
   try {
@@ -561,7 +566,7 @@ app.get("/api/inventory/summary", authenticate, requireModule("inventory"), asyn
   }
 });
 
-app.get("/api/inventory/expiry", authenticate, requireRoles("admin", "manager", "inventory_manager"), async (req, res, next) => {
+app.get("/api/inventory/expiry", authenticate, requireModule("inventory"), requireRoles("admin", "manager", "inventory_manager"), async (req, res, next) => {
   const rawDays = req.query.days;
   const days = rawDays === undefined ? 90 : typeof rawDays === "string" && /^\d{1,3}$/.test(rawDays) ? Number(rawDays) : NaN;
   if (!Number.isInteger(days) || days < 1 || days > 365) {
@@ -580,7 +585,7 @@ app.get("/api/inventory/expiry", authenticate, requireRoles("admin", "manager", 
   }
 });
 
-app.get("/api/inventory/transfer-branches", authenticate, requireRoles("admin", "manager", "inventory_manager"), async (req, res, next) => {
+app.get("/api/inventory/transfer-branches", authenticate, requireModule("inventory"), requireRoles("admin", "manager", "inventory_manager"), async (req, res, next) => {
   try {
     const branches = await listTransferBranches(req.user!.branchId);
     res.json({ branches });
@@ -589,7 +594,7 @@ app.get("/api/inventory/transfer-branches", authenticate, requireRoles("admin", 
   }
 });
 
-app.get("/api/inventory/transfers", authenticate, requireRoles("admin", "manager", "inventory_manager"), async (req, res, next) => {
+app.get("/api/inventory/transfers", authenticate, requireModule("inventory"), requireRoles("admin", "manager", "inventory_manager"), async (req, res, next) => {
   try {
     const transfers = await listInventoryTransfers(req.user!.branchId);
     res.json({ transfers: transfers.map((transfer) => ({
@@ -605,7 +610,7 @@ app.get("/api/inventory/transfers", authenticate, requireRoles("admin", "manager
   }
 });
 
-app.post("/api/inventory/transfers", authenticate, requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
+app.post("/api/inventory/transfers", authenticate, requireModule("inventory"), requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
   try {
     const input = inventoryTransferSchema.parse(req.body);
     handleOperation(() => createInventoryTransfer(input, req.user!), res, next, 201);
@@ -614,7 +619,7 @@ app.post("/api/inventory/transfers", authenticate, requireRoles("admin", "manage
   }
 });
 
-app.get("/api/inventory/transfers/:id", authenticate, requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
+app.get("/api/inventory/transfers/:id", authenticate, requireModule("inventory"), requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid transfer ID." }); return; }
   handleOperation(async () => {
@@ -636,13 +641,13 @@ app.get("/api/inventory/transfers/:id", authenticate, requireRoles("admin", "man
   }, res, next);
 });
 
-app.post("/api/inventory/transfers/:id/dispatch", authenticate, requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
+app.post("/api/inventory/transfers/:id/dispatch", authenticate, requireModule("inventory"), requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid transfer ID." }); return; }
   handleOperation(() => dispatchInventoryTransfer(id, req.user!), res, next);
 });
 
-app.post("/api/inventory/transfers/:id/receive", authenticate, requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
+app.post("/api/inventory/transfers/:id/receive", authenticate, requireModule("inventory"), requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid transfer ID." }); return; }
   try {
@@ -653,7 +658,7 @@ app.post("/api/inventory/transfers/:id/receive", authenticate, requireRoles("adm
   }
 });
 
-app.get("/api/inventory/stock-takes", authenticate, requireRoles("admin", "manager", "inventory_manager"), async (req, res, next) => {
+app.get("/api/inventory/stock-takes", authenticate, requireModule("inventory"), requireRoles("admin", "manager", "inventory_manager"), async (req, res, next) => {
   try {
     const stockTakes = await listStockTakes(req.user!.branchId);
     res.json({ stockTakes: stockTakes.map((take) => ({
@@ -666,7 +671,7 @@ app.get("/api/inventory/stock-takes", authenticate, requireRoles("admin", "manag
   }
 });
 
-app.post("/api/inventory/stock-takes", authenticate, requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
+app.post("/api/inventory/stock-takes", authenticate, requireModule("inventory"), requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
   try {
     const input = stockTakeSchema.parse(req.body);
     handleOperation(() => createStockTake(input, req.user!), res, next, 201);
@@ -675,7 +680,7 @@ app.post("/api/inventory/stock-takes", authenticate, requireRoles("admin", "mana
   }
 });
 
-app.get("/api/inventory/stock-takes/:id", authenticate, requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
+app.get("/api/inventory/stock-takes/:id", authenticate, requireModule("inventory"), requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid stock take ID." }); return; }
   handleOperation(async () => {
@@ -693,7 +698,7 @@ app.get("/api/inventory/stock-takes/:id", authenticate, requireRoles("admin", "m
   }, res, next);
 });
 
-app.post("/api/inventory/stock-takes/:id/complete", authenticate, requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
+app.post("/api/inventory/stock-takes/:id/complete", authenticate, requireModule("inventory"), requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid stock take ID." }); return; }
   try {
@@ -704,7 +709,7 @@ app.post("/api/inventory/stock-takes/:id/complete", authenticate, requireRoles("
   }
 });
 
-app.post("/api/inventory/adjustments", authenticate, requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
+app.post("/api/inventory/adjustments", authenticate, requireModule("inventory"), requireRoles("admin", "manager", "inventory_manager"), (req, res, next) => {
   try {
     const input = adjustmentSchema.parse(req.body);
     handleOperation(() => adjustInventory(input, req.user!), res, next, 201);
@@ -725,7 +730,7 @@ app.get("/api/suppliers", authenticate, requireModule("suppliers"), async (_req,
   }
 });
 
-app.post("/api/suppliers", authenticate, requireRoles("admin", "manager", "procurement_officer"), (req, res, next) => {
+app.post("/api/suppliers", authenticate, requireModule("suppliers"), requireRoles("admin", "manager", "procurement_officer"), (req, res, next) => {
   try {
     const input = supplierSchema.parse(req.body);
     handleOperation(() => createSupplier(input, req.user!), res, next, 201);
@@ -734,7 +739,7 @@ app.post("/api/suppliers", authenticate, requireRoles("admin", "manager", "procu
   }
 });
 
-app.get("/api/purchase-orders", authenticate, async (req, res, next) => {
+app.get("/api/purchase-orders", authenticate, requireModule("purchases"), async (req, res, next) => {
   try {
     const orders = await listPurchaseOrders(req.user!.branchId);
     res.json({ orders: orders.map((order) => ({
@@ -748,13 +753,13 @@ app.get("/api/purchase-orders", authenticate, async (req, res, next) => {
   }
 });
 
-app.get("/api/purchase-orders/:id", authenticate, (req, res, next) => {
+app.get("/api/purchase-orders/:id", authenticate, requireModule("purchases"), (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid purchase order ID." }); return; }
   handleOperation(() => getPurchaseOrder(id, req.user!.branchId), res, next);
 });
 
-app.post("/api/purchase-orders", authenticate, requireRoles("admin", "manager", "procurement_officer"), (req, res, next) => {
+app.post("/api/purchase-orders", authenticate, requireModule("purchases"), requireRoles("admin", "manager", "procurement_officer"), (req, res, next) => {
   try {
     const input = purchaseOrderSchema.parse(req.body);
     handleOperation(() => createPurchaseOrder(input, req.user!), res, next, 201);
@@ -763,13 +768,13 @@ app.post("/api/purchase-orders", authenticate, requireRoles("admin", "manager", 
   }
 });
 
-app.post("/api/purchase-orders/:id/approve", authenticate, requireRoles("admin", "manager"), (req, res, next) => {
+app.post("/api/purchase-orders/:id/approve", authenticate, requireModule("purchases"), requireRoles("admin", "manager"), (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid purchase order ID." }); return; }
   handleOperation(() => approvePurchaseOrder(id, req.user!), res, next);
 });
 
-app.post("/api/purchase-orders/:id/receive", authenticate, requireRoles("admin", "manager", "procurement_officer", "inventory_manager"), (req, res, next) => {
+app.post("/api/purchase-orders/:id/receive", authenticate, requireModule("purchases"), requireRoles("admin", "manager", "procurement_officer", "inventory_manager"), (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid purchase order ID." }); return; }
   try {
@@ -794,7 +799,7 @@ app.get("/api/customers", authenticate, requireModule("customers"), async (req, 
   }
 });
 
-app.post("/api/customers", authenticate, requireRoles("admin", "manager", "cashier", "accountant"), (req, res, next) => {
+app.post("/api/customers", authenticate, requireModule("customers"), requireRoles("admin", "manager", "cashier", "accountant"), (req, res, next) => {
   try {
     const input = customerSchema.parse(req.body);
     handleOperation(() => createCustomer(input, req.user!), res, next, 201);
@@ -807,11 +812,11 @@ app.get("/api/shifts/active", authenticate, requireModule("shifts"), (req, res, 
   handleOperation(async () => ({ shift: await getActiveShift(req.user!) }), res, next);
 });
 
-app.get("/api/shifts/close-summary", authenticate, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+app.get("/api/shifts/close-summary", authenticate, requireModule("shifts"), requireRoles("admin", "manager", "cashier"), (req, res, next) => {
   handleOperation(async () => ({ summary: await getShiftCloseSummary(req.user!) }), res, next);
 });
 
-app.post("/api/shifts/open", authenticate, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+app.post("/api/shifts/open", authenticate, requireModule("shifts"), requireRoles("admin", "manager", "cashier"), (req, res, next) => {
   try {
     const input = openShiftSchema.parse(req.body);
     handleOperation(() => openShift(input, req.user!), res, next, 201);
@@ -820,7 +825,7 @@ app.post("/api/shifts/open", authenticate, requireRoles("admin", "manager", "cas
   }
 });
 
-app.post("/api/shifts/cash-movements", authenticate, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+app.post("/api/shifts/cash-movements", authenticate, requireModule("shifts"), requireRoles("admin", "manager", "cashier"), (req, res, next) => {
   try {
     const input = cashMovementSchema.parse(req.body);
     handleOperation(() => addCashMovement(input, req.user!), res, next, 201);
@@ -829,7 +834,7 @@ app.post("/api/shifts/cash-movements", authenticate, requireRoles("admin", "mana
   }
 });
 
-app.post("/api/shifts/close", authenticate, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+app.post("/api/shifts/close", authenticate, requireModule("shifts"), requireRoles("admin", "manager", "cashier"), (req, res, next) => {
   try {
     const input = closeShiftSchema.parse(req.body);
     handleOperation(() => closeShift(input, req.user!), res, next);
@@ -851,7 +856,7 @@ app.get("/api/expenses", authenticate, requireModule("expenses"), async (req, re
   }
 });
 
-app.post("/api/expenses", authenticate, requireRoles("admin", "manager", "accountant", "cashier"), (req, res, next) => {
+app.post("/api/expenses", authenticate, requireModule("expenses"), requireRoles("admin", "manager", "accountant", "cashier"), (req, res, next) => {
   try {
     const input = expenseSchema.parse(req.body);
     handleOperation(() => createExpense(input, req.user!), res, next, 201);
@@ -860,7 +865,7 @@ app.post("/api/expenses", authenticate, requireRoles("admin", "manager", "accoun
   }
 });
 
-app.post("/api/expenses/:id/decision", authenticate, requireRoles("admin", "manager", "accountant"), (req, res, next) => {
+app.post("/api/expenses/:id/decision", authenticate, requireModule("expenses"), requireRoles("admin", "manager", "accountant"), (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid expense ID." }); return; }
   try {
@@ -871,7 +876,7 @@ app.post("/api/expenses/:id/decision", authenticate, requireRoles("admin", "mana
   }
 });
 
-app.get("/api/refunds", authenticate, async (req, res, next) => {
+app.get("/api/refunds", authenticate, requireModule("sales"), async (req, res, next) => {
   try {
     const refunds = await listRefunds(req.user!.branchId);
     res.json({ refunds: refunds.map((refund) => ({
@@ -929,11 +934,11 @@ app.get("/api/sales", authenticate, requireModule("sales"), async (req, res, nex
   }
 });
 
-app.get("/api/sales/held", authenticate, authenticatePos, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+app.get("/api/sales/held", authenticate, authenticatePos, requireModule("pos"), requireRoles("admin", "manager", "cashier"), (req, res, next) => {
   void listHeldSales(req.user!).then((sales) => res.json({ sales }), next);
 });
 
-app.post("/api/sales/held", authenticate, authenticatePos, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+app.post("/api/sales/held", authenticate, authenticatePos, requireModule("pos"), requireRoles("admin", "manager", "cashier"), (req, res, next) => {
   try {
     const input = heldSaleSchema.parse(req.body);
     void holdSale(input, req.user!).then((sale) => res.status(201).json({ sale }), next);
@@ -942,13 +947,13 @@ app.post("/api/sales/held", authenticate, authenticatePos, requireRoles("admin",
   }
 });
 
-app.post("/api/sales/held/:id/retrieve", authenticate, authenticatePos, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+app.post("/api/sales/held/:id/retrieve", authenticate, authenticatePos, requireModule("pos"), requireRoles("admin", "manager", "cashier"), (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid held sale ID." }); return; }
   void retrieveHeldSale(id, req.user!).then((sale) => res.json({ sale }), next);
 });
 
-app.post("/api/bank-transfer-verifications", authenticate, authenticatePos, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+app.post("/api/bank-transfer-verifications", authenticate, authenticatePos, requireModule("pos"), requireRoles("admin", "manager", "cashier"), (req, res, next) => {
   try {
     const input = bankTransferVerificationRequestSchema.parse(req.body);
     void requestBankTransferVerification(input, req.user!).then(
@@ -960,7 +965,7 @@ app.post("/api/bank-transfer-verifications", authenticate, authenticatePos, requ
   }
 });
 
-app.get("/api/bank-transfer-verifications/status", authenticate, authenticatePos, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+app.get("/api/bank-transfer-verifications/status", authenticate, authenticatePos, requireModule("pos"), requireRoles("admin", "manager", "cashier"), (req, res, next) => {
   const reference = typeof req.query.reference === "string" ? req.query.reference.trim() : "";
   if (!reference || reference.length > 100) { res.status(400).json({ error: "A valid bank transfer reference is required." }); return; }
   void getBankTransferVerification(reference, req.user!).then((verification) => res.json({ verification }), next);
@@ -984,7 +989,7 @@ app.post("/api/bank-transfer-verifications/:id/decision", authenticate, requireR
   }
 });
 
-app.get("/api/sales/:id", authenticate, async (req, res, next) => {
+app.get("/api/sales/:id", authenticate, requireModule("sales"), async (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid sale ID." }); return; }
   try {
@@ -1041,7 +1046,7 @@ app.get("/api/sales/:id", authenticate, async (req, res, next) => {
   }
 });
 
-app.post("/api/sales/:id/refunds", authenticate, requireRoles("admin", "manager"), (req, res, next) => {
+app.post("/api/sales/:id/refunds", authenticate, requireModule("sales"), requireRoles("admin", "manager"), (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid sale ID." }); return; }
   try {
@@ -1114,7 +1119,7 @@ app.get("/api/dashboard/summary", authenticate, requireModule("dashboard"), asyn
   }
 });
 
-app.post("/api/sales", authenticate, authenticatePos, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+app.post("/api/sales", authenticate, authenticatePos, requireModule("pos"), requireRoles("admin", "manager", "cashier"), (req, res, next) => {
   const idempotencyKey = req.header("Idempotency-Key");
   if (!idempotencyKey || idempotencyKey.length > 100) {
     res.status(400).json({ error: "A valid Idempotency-Key header is required." });

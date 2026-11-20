@@ -15,6 +15,7 @@ describe("staff management validation", () => {
     const result = createStaffSchema.parse({
       name: "  Alex Staff  ",
       email: "staff@example.com",
+      username: "alex.staff",
       password: "a-secure-password",
       role: "cashier",
       departmentId: 2,
@@ -39,8 +40,8 @@ describe("staff management validation", () => {
     expect(createStaffSchema.safeParse({ ...input, password: "long-enough-password", role: "root" }).success).toBe(false);
   });
 
-  it("only lets administrators assign admin or manager roles", () => {
-    expect(canAssignStaffRole(actor(["manager"]), "cashier")).toBe(true);
+  it("allows only administrators to create accounts and assign roles", () => {
+    expect(canAssignStaffRole(actor(["manager"]), "cashier")).toBe(false);
     expect(canAssignStaffRole(actor(["manager"]), "manager")).toBe(false);
     expect(canAssignStaffRole(actor(["manager"]), "admin")).toBe(false);
     expect(canAssignStaffRole(actor(["admin"]), "manager")).toBe(true);

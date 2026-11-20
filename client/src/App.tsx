@@ -47,7 +47,45 @@ const aggregateCartItems = (items: PosCartLine[]) => {
 
 function PermissionRoute({ module, user, children }: { module: string; user: User; children: ReactNode }) {
   if (user.modules?.includes(module)) return <>{children}</>;
-  return <Navigate to="/" replace />;
+  const landing = getLandingPath(user);
+  return landing === window.location.pathname
+    ? <AccessDeniedPage />
+    : <Navigate to={landing} replace />;
+}
+
+function getLandingPath(user: User): string {
+  const routeMap: Record<string, string> = {
+    dashboard: "/", pos: "/pos", sales: "/sales", products: "/products",
+    inventory: "/inventory", purchases: "/purchases", suppliers: "/suppliers",
+    customers: "/customers", expenses: "/expenses", shifts: "/shifts",
+    reports: "/reports",
+  };
+  if (user.roles.includes("cashier")) {
+    return user.modules?.includes("pos") ? "/pos" : "/access-denied";
+  }
+  if (user.roles.includes("admin") && user.modules?.includes("dashboard")) return "/";
+  const landing = user.defaultLanding;
+  if (landing && Object.entries(routeMap).some(([moduleId, route]) =>
+    route === landing && user.modules?.includes(moduleId))) return landing;
+  const fallback = user.modules?.find((moduleId) => routeMap[moduleId]);
+  return fallback ? routeMap[fallback]! : "/access-denied";
+}
+
+function LandingRoute({ user }: { user: User }) {
+  const landing = getLandingPath(user);
+  if (landing === "/") {
+    return <PermissionRoute module="dashboard" user={user}><DashboardPage user={user} /></PermissionRoute>;
+  }
+  if (landing === "/access-denied") return <AccessDeniedPage />;
+  return <Navigate to={landing} replace />;
+}
+
+function AccessDeniedPage() {
+  return <section className="page-content"><div className="panel access-denied-panel">
+    <div className="eyebrow">ACCESS RESTRICTED</div>
+    <h1>Access not assigned</h1>
+    <p>Your account does not currently have access to an available workspace. Contact an administrator to review your role and permissions.</p>
+  </div></section>;
 }
 
 function App() {
@@ -60,25 +98,88 @@ function App() {
   if (!me.data) return <LoginPage onLogin={(user) => {
     query.setQueryData(["me"], user);
   }} />;
+  if (me.data.mustChangePassword) return <ChangePasswordPage />;
   return (
     <Routes>
       <Route element={<AppShell user={me.data} />}>
-        <Route index element={<PermissionRoute module="dashboard" user={me.data}><DashboardPage user={me.data} /></PermissionRoute>} />
+        <Route index element={<LandingRoute user={me.data} />} />
         <Route path="/pos" element={<PermissionRoute module="pos" user={me.data}><PosEntryPage user={me.data} /></PermissionRoute>} />
         <Route path="/products" element={<PermissionRoute module="products" user={me.data}><ProductsPage user={me.data} /></PermissionRoute>} />
         <Route path="/inventory" element={<PermissionRoute module="inventory" user={me.data}><InventoryPage user={me.data} /></PermissionRoute>} />
         <Route path="/suppliers" element={<PermissionRoute module="suppliers" user={me.data}><SuppliersPage user={me.data} /></PermissionRoute>} />
         <Route path="/purchases" element={<PermissionRoute module="purchases" user={me.data}><PurchasesPage user={me.data} /></PermissionRoute>} />
         <Route path="/customers" element={<PermissionRoute module="customers" user={me.data}><CustomersPage user={me.data} /></PermissionRoute>} />
-        <Route path="/staff" element={<PermissionRoute module="employees" user={me.data}><StaffPage user={me.data} /></PermissionRoute>} />
+        <Route path="/staff" element={<AdminPermissionRoute user={me.data}><StaffPage user={me.data} /></AdminPermissionRoute>} />
         <Route path="/shifts" element={<PermissionRoute module="shifts" user={me.data}><ShiftsPage user={me.data} /></PermissionRoute>} />
         <Route path="/expenses" element={<PermissionRoute module="expenses" user={me.data}><ExpensesPage user={me.data} /></PermissionRoute>} />
         <Route path="/reports" element={<PermissionRoute module="reports" user={me.data}><ReportsPage user={me.data} /></PermissionRoute>} />
         <Route path="/sales" element={<PermissionRoute module="sales" user={me.data}><SalesPage user={me.data} /></PermissionRoute>} />
+        <Route path="/access-denied" element={<AccessDeniedPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
   );
+}
+
+function AdminPermissionRoute({ user, children }: { user: User; children: ReactNode }) {
+  if (user.roles.includes("admin") && user.modules?.includes("permissions")) return <>{children}</>;
+  return <AccessDeniedPage />;
+}
+
+function ChangePasswordPage() {
+  const query = useQueryClient();
+  const navigate = useNavigate();
+  const [error, setError] = useState("");
+  const schema = z.object({
+    currentPassword: z.string().min(1, "Enter your current password."),
+    newPassword: z.string().min(12, "Use at least 12 characters.").max(200),
+    confirmPassword: z.string().min(1, "Confirm your new password."),
+  }).refine((values) => values.newPassword === values.confirmPassword, {
+    path: ["confirmPassword"], message: "Passwords do not match.",
+  });
+  type Values = z.infer<typeof schema>;
+  const form = useForm<Values>({
+    resolver: zodResolver(schema),
+    defaultValues: { currentPassword: "", newPassword: "", confirmPassword: "" },
+  });
+  const change = useMutation({
+    mutationFn: async (values: Values) => api.post("/auth/change-password", {
+      currentPassword: values.currentPassword, newPassword: values.newPassword,
+    }),
+    onSuccess: () => {
+      const current = query.getQueryData<User>(["me"]);
+      if (current) {
+        const updated = { ...current, mustChangePassword: false };
+        query.setQueryData(["me"], updated);
+        navigate(getLandingPath(updated), { replace: true });
+      } else {
+        void query.invalidateQueries({ queryKey: ["me"] });
+      }
+    },
+    onError: (reason) => setError(getErrorMessage(reason)),
+  });
+  return <main className="login-page"><section className="login-card">
+    <div className="login-brand"><span className="brand-mark" aria-hidden="true">s</span><strong>Smart<span> POS</span></strong></div>
+    <div className="login-form">
+      <h1>Update your password</h1>
+      <p className="form-description">Your administrator issued a temporary password. Create a new one to continue.</p>
+      <form onSubmit={form.handleSubmit((values) => { setError(""); change.mutate(values); })}>
+        <label className="field-label" htmlFor="current-password">Temporary password</label>
+        <input id="current-password" type="password" autoComplete="current-password" {...form.register("currentPassword")} />
+        {form.formState.errors.currentPassword && <small className="field-error">{form.formState.errors.currentPassword.message}</small>}
+        <label className="field-label password-label" htmlFor="new-password">New password</label>
+        <input id="new-password" type="password" autoComplete="new-password" {...form.register("newPassword")} />
+        {form.formState.errors.newPassword && <small className="field-error">{form.formState.errors.newPassword.message}</small>}
+        <label className="field-label password-label" htmlFor="confirm-password">Confirm new password</label>
+        <input id="confirm-password" type="password" autoComplete="new-password" {...form.register("confirmPassword")} />
+        {form.formState.errors.confirmPassword && <small className="field-error">{form.formState.errors.confirmPassword.message}</small>}
+        {error && <div role="alert" className="error-banner">{error}</div>}
+        <button className="button button-dark login-submit" disabled={change.isPending}>
+          {change.isPending ? "Updating…" : "Update password"}
+        </button>
+      </form>
+    </div>
+  </section></main>;
 }
 
 function LoginPage({ onLogin }: { onLogin: (user: User) => void }) {
@@ -92,25 +193,7 @@ function LoginPage({ onLogin }: { onLogin: (user: User) => void }) {
     mutationFn: async (values: LoginValues) => (await api.post<{ user: User }>("/auth/login", values)).data.user,
     onSuccess: (user) => {
       onLogin(user);
-      const routeMap: Record<string, string> = {
-        dashboard: "/", pos: "/pos", sales: "/sales", products: "/products",
-        inventory: "/inventory", purchases: "/purchases", suppliers: "/suppliers",
-        customers: "/customers", employees: "/staff", expenses: "/expenses",
-        shifts: "/shifts", reports: "/reports", permissions: "/staff",
-        settings: "/staff", audit: "/staff",
-      };
-      let landing = "/";
-      if (user.roles.includes("cashier") && user.modules?.includes("pos")) {
-        landing = "/pos";
-      } else if (user.defaultLanding) {
-        const moduleId = user.defaultLanding.replace("/", "");
-        if (user.modules?.includes(moduleId)) landing = user.defaultLanding;
-      }
-      if (!landing || landing === "/" && !user.modules?.includes("dashboard")) {
-        const fallback = user.modules?.find((moduleId) => routeMap[moduleId]);
-        landing = fallback ? routeMap[fallback] : "/";
-      }
-      navigate(landing);
+      navigate(user.mustChangePassword ? "/change-password" : getLandingPath(user));
     },
     onError: (error) => setMessage(getErrorMessage(error)),
   });
@@ -159,7 +242,7 @@ function AppShell({ user }: { user: User }) {
   const pageLabels: Record<string, string> = {
     "/inventory": "Inventory", "/suppliers": "Suppliers", "/purchases": "Purchasing",
     "/customers": "Customers", "/shifts": "Cashier shifts", "/expenses": "Expenses", "/sales": "Sales & returns",
-    "/staff": "Team", "/reports": "Reports",
+    "/staff": "User management", "/reports": "Reports",
   };
   const pageLabel = pageLabels[location.pathname];
   if (isPos) {
@@ -183,12 +266,11 @@ function AppShell({ user }: { user: User }) {
           {user.modules?.includes("purchases") && <NavLink to="/purchases" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Truck size={18} /> Purchasing</NavLink>}
           {user.modules?.includes("suppliers") && <NavLink to="/suppliers" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Users size={18} /> Suppliers</NavLink>}
           {user.modules?.includes("customers") && <NavLink to="/customers" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Users size={18} /> Customers</NavLink>}
-          {user.modules?.includes("employees") && <NavLink to="/staff" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Users size={18} /> Team</NavLink>}
           {user.modules?.includes("shifts") && <NavLink to="/shifts" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Banknote size={18} /> Cashier shifts</NavLink>}
           {user.modules?.includes("expenses") && <NavLink to="/expenses" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><ReceiptText size={18} /> Expenses</NavLink>}
           {user.modules?.includes("reports") && <NavLink to="/reports" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><TrendingUp size={18} /> Reports</NavLink>}
           {user.modules?.includes("sales") && <NavLink to="/sales" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><RotateCcw size={18} /> Sales & returns</NavLink>}
-          {(user.modules?.includes("permissions") || user.modules?.includes("employees")) && <NavLink to="/staff" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><ShieldCheck size={18} /> User management</NavLink>}
+          {user.roles.includes("admin") && user.modules?.includes("permissions") && <NavLink to="/staff" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><ShieldCheck size={18} /> User management</NavLink>}
         </nav>
         <div className="sidebar-bottom">
           <div className="help-card"><div className="help-icon"><Command size={17} /></div><strong>Need a hand?</strong><p>Your store tools, all in one place.</p></div>
@@ -1109,40 +1191,92 @@ function PurchasesPage({ user }: { user: User }) {
 
 function StaffPage({ user }: { user: User }) {
   const query = useQueryClient();
-  const canCreate = user.roles.some((role) => ["admin", "manager"].includes(role));
-  const isAdmin = user.roles.includes("admin");
   const [search, setSearch] = useState("");
   const [error, setError] = useState("");
-  const [form, setForm] = useState({
-    name: "", email: "", password: "", role: "cashier",
-    departmentId: "", jobTitle: "", phone: "", hiredAt: "",
+  const [branchId, setBranchId] = useState(String(user.branchId));
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [activityId, setActivityId] = useState<number | null>(null);
+  const [resetId, setResetId] = useState<number | null>(null);
+  const [resetPassword, setResetPassword] = useState("");
+  const [activeTab, setActiveTab] = useState<"users" | "roles">("users");
+  const [roleName, setRoleName] = useState("cashier");
+  const [roleDraft, setRoleDraft] = useState<Record<string, boolean>>({});
+  const emptyForm = () => ({
+    name: "", email: "", username: "", password: "", role: "cashier",
+    branchId: String(user.branchId), departmentId: "", employeeNumber: "",
+    jobTitle: "", phone: "", hiredAt: "", defaultLanding: "",
+    isActive: true, mustChangePassword: true,
   });
+  const [form, setForm] = useState(emptyForm);
+  const [moduleSelections, setModuleSelections] = useState<Record<string, boolean | null>>({});
+  type Module = { id: string; name: string; route: string; sortOrder: number };
+  type Member = {
+    id: number; name: string; email: string; username: string; isActive: boolean; createdAt: string;
+    department: string | null; employeeNumber: string | null; jobTitle: string | null; phone: string | null;
+    hiredAt: string | null; roles: string[]; lastLogin: string | null; defaultLanding: string | null;
+    branchId: number; branch: string; permissionOverrides: Array<{ moduleId: string; allowed: boolean }>;
+  };
   const staff = useQuery({
-    queryKey: ["staff", search],
+    queryKey: ["staff", branchId, search],
     queryFn: async () => (await api.get<{ staff: Array<{
-      id: number; name: string; email: string; isActive: boolean; createdAt: string;
-      department: string | null; jobTitle: string | null; phone: string | null;
-      hiredAt: string | null; roles: string[]; lastLogin: string | null;
-    }> }>("/staff", { params: { search } })).data.staff,
+      id: number; name: string; email: string; username: string; isActive: boolean; createdAt: string;
+      department: string | null; employeeNumber: string | null; jobTitle: string | null; phone: string | null;
+      hiredAt: string | null; roles: string[]; lastLogin: string | null; defaultLanding: string | null;
+      branchId: number; branch: string; permissionOverrides: Array<{ moduleId: string; allowed: boolean }>;
+    }> }>("/staff", { params: { search, branchId: Number(branchId) } })).data.staff as Member[],
   });
   const departments = useQuery({
     queryKey: ["staff-departments"],
     queryFn: async () => (await api.get<{ departments: Array<{ id: number; name: string }> }>("/staff/departments")).data.departments,
   });
+  const modules = useQuery({
+    queryKey: ["access-modules"],
+    queryFn: async () => (await api.get<{ modules: Module[] }>("/access/modules")).data.modules,
+  });
+  const branches = useQuery({
+    queryKey: ["staff-branches"],
+    queryFn: async () => (await api.get<{ branches: Array<{ id: number; name: string; code: string }> }>("/staff/branches")).data.branches,
+  });
+  const roles = useQuery({
+    queryKey: ["access-roles"],
+    queryFn: async () => (await api.get<{ roles: Array<{
+      id: number; name: string; permissions: Array<{ moduleId: string; name: string; route: string; allowed: boolean }>;
+    }> }>("/access/roles")).data.roles,
+  });
+  const roleDefaults = roles.data?.find((role) => role.name === form.role)?.permissions ?? [];
+  const rolePermissions = roles.data?.find((role) => role.name === roleName)?.permissions ?? [];
+  const activity = useQuery({
+    queryKey: ["staff-activity", activityId],
+    enabled: activityId !== null,
+    queryFn: async () => (await api.get<{
+      logins: Array<{ success: boolean; identifier: string | null; ipAddress: string | null; userAgent: string | null; createdAt: string }>;
+      activity: Array<{ action: string; entityType: string | null; entityId: string | null; details: string | null; createdAt: string }>;
+    }>(`/staff/${activityId}/activity`)).data,
+  });
   const refresh = () => {
     void query.invalidateQueries({ queryKey: ["staff"] });
     void query.invalidateQueries({ queryKey: ["dashboard"] });
   };
-  const create = useMutation({
-    mutationFn: () => api.post("/staff", {
-      ...form,
-      departmentId: form.departmentId ? Number(form.departmentId) : null,
-      hiredAt: form.hiredAt || null,
-      phone: form.phone || undefined,
-      jobTitle: form.jobTitle || undefined,
-    }),
+  const save = useMutation({
+    mutationFn: async (): Promise<void> => {
+      const payload = {
+        name: form.name, email: form.email, username: form.username, role: form.role,
+        branchId: Number(form.branchId), departmentId: form.departmentId ? Number(form.departmentId) : null,
+        employeeNumber: form.employeeNumber || null, jobTitle: form.jobTitle || "",
+        phone: form.phone || "", hiredAt: form.hiredAt || null,
+        defaultLanding: form.defaultLanding || null, isActive: form.isActive,
+        modulePermissions: Object.entries(moduleSelections).map(([moduleId, allowed]) => ({ moduleId, allowed })),
+      };
+      if (editingId) {
+        await api.put(`/staff/${editingId}`, payload);
+      } else {
+        await api.post("/staff", { ...payload, password: form.password, mustChangePassword: form.mustChangePassword });
+      }
+    },
     onSuccess: () => {
-      setForm({ name: "", email: "", password: "", role: "cashier", departmentId: "", jobTitle: "", phone: "", hiredAt: "" });
+      setForm(emptyForm());
+      setModuleSelections({});
+      setEditingId(null);
       setError("");
       refresh();
     },
@@ -1153,40 +1287,146 @@ function StaffPage({ user }: { user: User }) {
     onSuccess: () => { setError(""); refresh(); },
     onError: (reason) => setError(getErrorMessage(reason)),
   });
-  const roleOptions = isAdmin
-    ? ["admin", "manager", "cashier", "inventory_manager", "procurement_officer", "accountant"]
-    : ["cashier", "inventory_manager", "procurement_officer", "accountant"];
+  const reset = useMutation({
+    mutationFn: () => api.post(`/staff/${resetId}/password-reset`, { password: resetPassword }),
+    onSuccess: () => { setResetId(null); setResetPassword(""); setError(""); },
+    onError: (reason) => setError(getErrorMessage(reason)),
+  });
+  const saveRole = useMutation({
+    mutationFn: () => api.put(`/access/roles/${roleName}`, {
+      permissions: rolePermissions.map((permission) => ({
+        moduleId: permission.moduleId,
+        allowed: roleDraft[permission.moduleId] ?? permission.allowed,
+      })),
+    }),
+    onSuccess: () => {
+      setError("");
+      void query.invalidateQueries({ queryKey: ["access-roles"] });
+      void query.invalidateQueries({ queryKey: ["staff"] });
+    },
+    onError: (reason) => setError(getErrorMessage(reason)),
+  });
+  const beginEdit = (member: Member) => {
+    setEditingId(member.id);
+    setForm({
+      name: member.name, email: member.email, username: member.username, password: "",
+      role: member.roles[0] ?? "cashier", branchId: String(member.branchId),
+      departmentId: "", employeeNumber: member.employeeNumber ?? "",
+      jobTitle: member.jobTitle ?? "", phone: member.phone ?? "", hiredAt: member.hiredAt ?? "",
+      defaultLanding: member.defaultLanding ?? "", isActive: member.isActive, mustChangePassword: false,
+    });
+    setModuleSelections(Object.fromEntries(member.permissionOverrides.map(({ moduleId, allowed }) => [moduleId, allowed])));
+    setError("");
+  };
+  const cancelEdit = () => {
+    setEditingId(null);
+    setForm(emptyForm());
+    setModuleSelections({});
+  };
+  const currentRole = roles.data?.find((role) => role.name === form.role);
+  const availableLandings = (modules.data ?? []).filter((module) => {
+    if (module.id === "permissions") return false;
+    const assigned = moduleSelections[module.id] ?? currentRole?.permissions.find((permission) => permission.moduleId === module.id)?.allowed;
+    return Boolean(assigned);
+  });
+  const modulesLoading = modules.isPending || roles.isPending;
   return <section className="page-content operations-page">
-    <PageHeader eyebrow="EMPLOYEE MANAGEMENT" title="Team" detail="Manage branch staff accounts, roles, departments, and access status." />
+    <PageHeader eyebrow="ACCESS CONTROL" title="User management" detail="Create staff accounts, assign roles, and control access to each workspace." />
     {error && <ErrorBanner message={error} onRetry={() => setError("")} />}
-    {(staff.isError || departments.isError) && <ErrorBanner message={getErrorMessage(staff.error ?? departments.error)} onRetry={() => { void staff.refetch(); void departments.refetch(); }} />}
-    {canCreate && <section className="panel operation-form-panel">
-      <div className="panel-heading"><div><div className="eyebrow">STAFF ONBOARDING</div><h2>Create a staff account</h2></div></div>
-      <form className="operation-form staff-form" onSubmit={(event) => { event.preventDefault(); setError(""); create.mutate(); }}>
+    {(staff.isError || departments.isError || modules.isError || branches.isError || roles.isError)
+      && <ErrorBanner message={getErrorMessage(staff.error ?? departments.error ?? modules.error ?? branches.error ?? roles.error)} onRetry={() => {
+        void staff.refetch(); void departments.refetch(); void modules.refetch(); void branches.refetch(); void roles.refetch();
+      }} />}
+    <div className="staff-tabs" role="tablist">
+      <button className={activeTab === "users" ? "active" : ""} onClick={() => setActiveTab("users")}>Users and access</button>
+      <button className={activeTab === "roles" ? "active" : ""} onClick={() => setActiveTab("roles")}>Role defaults</button>
+    </div>
+    {activeTab === "users" && <section className="panel operation-form-panel user-management-form">
+      <div className="panel-heading"><div><div className="eyebrow">{editingId ? "EDIT ACCOUNT" : "STAFF ONBOARDING"}</div><h2>{editingId ? "Update user account" : "Create a user account"}</h2></div>
+        {editingId && <button className="small-action" type="button" onClick={cancelEdit}>Cancel edit</button>}</div>
+      <form className="operation-form staff-form" onSubmit={(event) => { event.preventDefault(); setError(""); save.mutate(); }}>
         <label>Full name<input required minLength={2} maxLength={150} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label>
         <label>Work email<input type="email" required maxLength={254} value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label>
-        <label>Initial password<input type="password" autoComplete="new-password" minLength={12} maxLength={200} required value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /><small>At least 12 characters. Share securely with the employee.</small></label>
-        <label>Role<select value={form.role} onChange={(event) => setForm({ ...form, role: event.target.value })}>{roleOptions.map((role) => <option key={role} value={role}>{role.replaceAll("_", " ")}</option>)}</select></label>
+        <label>Username<input required minLength={4} maxLength={100} pattern="[A-Za-z0-9._-]+" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} /></label>
+        {!editingId && <label>Temporary password<input type="password" autoComplete="new-password" minLength={12} maxLength={200} required value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /><small>At least 12 characters. The employee must change it after signing in.</small></label>}
+        <label>Role<select value={form.role} onChange={(event) => setForm({ ...form, role: event.target.value, defaultLanding: "" })}>{roles.data?.map((role) => <option key={role.name} value={role.name}>{role.name.replaceAll("_", " ")}</option>)}</select></label>
+        <label>Branch<select value={form.branchId} onChange={(event) => setForm({ ...form, branchId: event.target.value })}>{branches.data?.map((branch) => <option key={branch.id} value={branch.id}>{branch.name} ({branch.code})</option>)}</select></label>
         <label>Department<select value={form.departmentId} onChange={(event) => setForm({ ...form, departmentId: event.target.value })}><option value="">Unassigned</option>{departments.data?.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</select></label>
+        <label>Employee number<input maxLength={50} value={form.employeeNumber} onChange={(event) => setForm({ ...form, employeeNumber: event.target.value })} /></label>
         <label>Job title<input maxLength={120} value={form.jobTitle} onChange={(event) => setForm({ ...form, jobTitle: event.target.value })} /></label>
         <label>Phone<input maxLength={40} value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} /></label>
         <label>Hire date<input type="date" value={form.hiredAt} onChange={(event) => setForm({ ...form, hiredAt: event.target.value })} /></label>
-        <button className="button button-dark" disabled={create.isPending || departments.isPending}>{create.isPending ? "Creating account…" : "Create staff account"}</button>
+        <label>Default landing page<select value={form.defaultLanding} onChange={(event) => setForm({ ...form, defaultLanding: event.target.value })}><option value="">Use role default</option>{availableLandings.map((module) => <option key={`${module.id}-${module.route}`} value={module.route}>{module.name}</option>)}</select></label>
+        {!editingId && <label className="staff-checkbox"><input type="checkbox" checked={form.mustChangePassword} onChange={(event) => setForm({ ...form, mustChangePassword: event.target.checked })} /> Require password change at first sign-in</label>}
+        <label className="staff-checkbox"><input type="checkbox" checked={form.isActive} onChange={(event) => setForm({ ...form, isActive: event.target.checked })} /> Account active</label>
+        <div className="user-permission-editor">
+          <div className="panel-heading"><div><div className="eyebrow">MODULE ACCESS</div><h3>Permissions for this user</h3></div><small>Inherit role, allow, or deny access.</small></div>
+          {modulesLoading ? <LoadingRows /> : <div className="permission-matrix">
+            {(modules.data ?? []).map((module) => {
+              const selected = moduleSelections[module.id] ?? null;
+              const fallback = roleDefaults.find((permission) => permission.moduleId === module.id)?.allowed ?? false;
+              return <label key={module.id}><span>{module.name}<small>{module.route}</small></span><select value={selected === null ? "" : selected ? "allow" : "deny"} onChange={(event) => setModuleSelections({
+                ...moduleSelections,
+                [module.id]: event.target.value === "" ? null : event.target.value === "allow",
+              })}>
+                <option value="">Role default ({fallback ? "allow" : "deny"})</option><option value="allow">Allow</option><option value="deny">Deny</option>
+              </select></label>;
+            })}
+          </div>}
+        </div>
+        <button className="button button-dark" disabled={save.isPending || modulesLoading || branches.isPending}>
+          {save.isPending ? "Saving…" : editingId ? "Save user changes" : "Create user account"}
+        </button>
       </form>
     </section>}
-    <section className="panel operation-table-panel">
-      <div className="products-toolbar"><div><div className="eyebrow">BRANCH DIRECTORY</div><h2>Staff accounts</h2></div><label className="table-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search name or email" /></label></div>
-      {staff.isPending ? <LoadingRows /> : <div className="product-table-wrap"><table className="product-table"><thead><tr><th>EMPLOYEE</th><th>ROLE</th><th>DEPARTMENT</th><th>LAST SIGN-IN</th><th>STATUS</th><th>ACCESS</th></tr></thead><tbody>
+    {activeTab === "users" && <section className="panel operation-table-panel">
+      <div className="products-toolbar"><div><div className="eyebrow">BRANCH DIRECTORY</div><h2>Staff accounts</h2></div><div className="staff-table-controls">
+        <select value={branchId} onChange={(event) => setBranchId(event.target.value)} aria-label="Filter by branch">{branches.data?.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}</select>
+        <label className="table-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search name, username, email or number" /></label>
+      </div></div>
+      {staff.isPending ? <LoadingRows /> : <div className="product-table-wrap"><table className="product-table"><thead><tr><th>EMPLOYEE</th><th>USERNAME</th><th>ROLE</th><th>BRANCH / DEPARTMENT</th><th>LAST SIGN-IN</th><th>STATUS</th><th>ACTIONS</th></tr></thead><tbody>
         {staff.data?.map((member) => <tr key={member.id}>
-          <td><div className="table-product-name"><span>{member.name.slice(0, 1).toUpperCase()}</span><div><strong>{member.name}</strong><small>{member.email}{member.jobTitle ? ` · ${member.jobTitle}` : ""}</small></div></div></td>
+          <td><div className="table-product-name"><span>{member.name.slice(0, 1).toUpperCase()}</span><div><strong>{member.name}{member.employeeNumber ? ` · ${member.employeeNumber}` : ""}</strong><small>{member.email}{member.jobTitle ? ` · ${member.jobTitle}` : ""}</small></div></div></td>
+          <td className="sku-cell">{member.username}</td>
           <td className="sku-cell">{member.roles.map((role) => role.replaceAll("_", " ").toUpperCase()).join(", ") || "NO ROLE"}</td>
-          <td>{member.department ?? "Unassigned"}</td>
+          <td>{member.branch} / {member.department ?? "Unassigned"}</td>
           <td>{member.lastLogin ? new Date(member.lastLogin).toLocaleString("en-KE") : "Never"}</td>
           <td><span className={`product-status ${member.isActive ? "" : "status-low"}`}><i /> {member.isActive ? "ACTIVE" : "INACTIVE"}</span></td>
-          <td>{isAdmin && member.id !== user.id && <button className={`small-action ${member.isActive ? "reject-action" : ""}`} onClick={() => setStatus.mutate({ id: member.id, isActive: !member.isActive })} disabled={setStatus.isPending}>{member.isActive ? "Deactivate" : "Activate"}</button>}</td>
+          <td className="row-actions">
+            <button className="small-action" onClick={() => beginEdit(member)}>Edit</button>
+            <button className="small-action" onClick={() => { setActivityId(activityId === member.id ? null : member.id); void query.invalidateQueries({ queryKey: ["staff-activity", member.id] }); }}>Activity</button>
+            {member.id !== user.id && <button className={`small-action ${member.isActive ? "reject-action" : ""}`} onClick={() => setStatus.mutate({ id: member.id, isActive: !member.isActive })} disabled={setStatus.isPending}>{member.isActive ? "Deactivate" : "Activate"}</button>}
+            {member.id !== user.id && <button className="small-action" onClick={() => { setResetId(resetId === member.id ? null : member.id); setResetPassword(""); }}>Reset password</button>}
+          </td>
         </tr>)}
       </tbody></table>{!staff.data?.length && <EmptyState title="No team members found" detail="Create staff accounts for this branch or refine your search." />}</div>}
-    </section>
+      {resetId !== null && <form className="staff-reset-form" onSubmit={(event) => { event.preventDefault(); setError(""); reset.mutate(); }}>
+        <strong>Set a temporary password</strong><input type="password" minLength={12} maxLength={200} required autoComplete="new-password" value={resetPassword} onChange={(event) => setResetPassword(event.target.value)} placeholder="At least 12 characters" />
+        <button className="small-action" disabled={reset.isPending}>{reset.isPending ? "Resetting…" : "Reset and require change"}</button>
+      </form>}
+      {activityId !== null && <div className="staff-activity-panel">
+        <div className="panel-heading"><div><div className="eyebrow">ACCOUNT HISTORY</div><h3>{staff.data?.find((member) => member.id === activityId)?.name}</h3></div><button className="small-action" onClick={() => setActivityId(null)}>Close</button></div>
+        {activity.isPending ? <LoadingRows /> : activity.isError ? <ErrorBanner message={getErrorMessage(activity.error)} onRetry={() => void activity.refetch()} /> : <div className="staff-activity-grid">
+          <div><strong>Login history</strong>{activity.data?.logins.map((entry, index) => <p key={`${entry.createdAt}-${index}`}><span className={entry.success ? "activity-success" : "activity-failed"}>{entry.success ? "Success" : "Failed"}</span> · {entry.identifier ?? "unknown"} · {new Date(entry.createdAt).toLocaleString("en-KE")} {entry.ipAddress ? `· ${entry.ipAddress}` : ""}</p>)}</div>
+          <div><strong>Recent activity</strong>{activity.data?.activity.map((entry, index) => <p key={`${entry.createdAt}-${index}`}>{entry.action} · {new Date(entry.createdAt).toLocaleString("en-KE")}</p>)}</div>
+        </div>}
+      </div>}
+    </section>}
+    {activeTab === "roles" && <section className="panel operation-table-panel role-management-panel">
+      <div className="products-toolbar"><div><div className="eyebrow">ROLE-BASED ACCESS</div><h2>Default role permissions</h2></div>
+        <select value={roleName} onChange={(event) => { setRoleName(event.target.value); setRoleDraft({}); }} aria-label="Select role">{roles.data?.map((role) => <option key={role.name} value={role.name}>{role.name.replaceAll("_", " ")}</option>)}</select>
+      </div>
+      <p className="role-management-note">User-specific allow or deny settings override these defaults. Administrator access cannot be reduced here.</p>
+      {roles.isPending ? <LoadingRows /> : <div className="permission-matrix role-matrix">
+        {rolePermissions.map((permission) => <label key={permission.moduleId}>
+          <span>{permission.name}<small>{permission.route}</small></span>
+          <input type="checkbox" checked={roleDraft[permission.moduleId] ?? permission.allowed} disabled={roleName === "admin"} onChange={(event) => setRoleDraft({ ...roleDraft, [permission.moduleId]: event.target.checked })} />
+        </label>)}
+      </div>}
+      <button className="button button-dark" disabled={saveRole.isPending || roleName === "admin" || roles.isPending} onClick={() => saveRole.mutate()}>
+        {roleName === "admin" ? "Administrator defaults are locked" : saveRole.isPending ? "Saving…" : "Save role permissions"}
+      </button>
+    </section>}
   </section>;
 }
 

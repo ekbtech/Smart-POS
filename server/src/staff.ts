@@ -13,6 +13,10 @@ export const staffRoles = [
   "procurement_officer",
   "accountant",
 ] as const;
+export const manageableModuleIds = new Set([
+  "dashboard", "pos", "sales", "products", "inventory", "purchases", "suppliers",
+  "customers", "expenses", "shifts", "reports", "permissions",
+]);
 
 export const createStaffSchema = z.object({
   name: z.string().trim().min(2).max(150),
@@ -27,7 +31,7 @@ export const createStaffSchema = z.object({
   employeeNumber: z.string().trim().min(1).max(50).nullable().optional(),
   modulePermissions: z.array(z.object({
     moduleId: z.string().min(1).max(40),
-    allowed: z.boolean(),
+    allowed: z.boolean().nullable(),
   }).strict()).optional(),
   permissions: z.array(z.string().min(1).max(40)).optional(),
   departmentId: z.number().int().positive().nullable().optional(),
@@ -46,6 +50,14 @@ export const resetStaffPasswordSchema = z.object({
 export const modulePermissionsSchema = z.array(z.object({
   moduleId: z.string().min(1).max(40),
   allowed: z.boolean(),
+}).strict()).max(100).superRefine((permissions, context) => {
+  if (new Set(permissions.map(({ moduleId }) => moduleId)).size !== permissions.length) {
+    context.addIssue({ code: "custom", message: "Each module can be configured only once." });
+  }
+});
+export const modulePermissionOverridesSchema = z.array(z.object({
+  moduleId: z.string().min(1).max(40),
+  allowed: z.boolean().nullable(),
 }).strict()).max(100).superRefine((permissions, context) => {
   if (new Set(permissions.map(({ moduleId }) => moduleId)).size !== permissions.length) {
     context.addIssue({ code: "custom", message: "Each module can be configured only once." });
@@ -110,32 +122,38 @@ async function ensureLandingAllowed(
   landing: string | null,
 ): Promise<void> {
   if (!landing) return;
-  const [modules] = await connection.execute<Array<RowDataPacket & { id: string }>>(
-    "SELECT id FROM modules WHERE route=? ORDER BY sort_order LIMIT 1",
-    [landing],
+  if (landing === "/staff") {
+    const [admins] = await connection.execute<Array<RowDataPacket & { is_admin: number }>>(
+      `SELECT EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id=ur.role_id
+                      WHERE ur.user_id=? AND r.name='admin') AS is_admin`,
+      [userId],
+    );
+    if (!admins[0]?.is_admin) throw new HttpError(400, "User management cannot be a default landing page.");
+  }
+  const [modules] = await connection.execute<Array<RowDataPacket & { allowed: number }>>(
+    `SELECT m.id, COALESCE(up.allowed, MAX(rp.allowed), FALSE) AS allowed
+     FROM modules m
+     LEFT JOIN user_permissions up ON up.user_id=? AND up.module_id=m.id
+     LEFT JOIN user_roles ur ON ur.user_id=?
+     LEFT JOIN role_permissions rp ON rp.role_id=ur.role_id AND rp.module_id=m.id
+     WHERE m.route=? AND m.id IN (${[...manageableModuleIds].map(() => "?").join(",")})
+     GROUP BY m.id, up.allowed`,
+    [userId, userId, landing, ...manageableModuleIds],
   );
-  const moduleId = modules[0]?.id;
-  if (!moduleId) throw new HttpError(400, "The default landing page is not available.");
-  const [roles] = await connection.execute<Array<RowDataPacket & { allowed: number }>>(
-    `SELECT MAX(rp.allowed) AS allowed
-     FROM user_roles ur JOIN role_permissions rp ON rp.role_id=ur.role_id
-     WHERE ur.user_id=? AND rp.module_id=?`,
-    [userId, moduleId],
-  );
-  const [overrides] = await connection.execute<Array<RowDataPacket & { allowed: number }>>(
-    "SELECT allowed FROM user_permissions WHERE user_id=? AND module_id=? LIMIT 1",
-    [userId, moduleId],
-  );
-  const allowed = overrides[0]?.allowed ?? roles[0]?.allowed;
-  if (!allowed) throw new HttpError(400, "The default landing page must be enabled for this user.");
+  if (!modules.some((module) => Boolean(module.allowed))) {
+    throw new HttpError(400, "The default landing page must be enabled for this user.");
+  }
 }
 
 async function validateModuleIds(
   connection: import("mysql2/promise").PoolConnection,
-  permissions: Array<{ moduleId: string; allowed: boolean }>,
+  permissions: Array<{ moduleId: string; allowed: boolean | null }>,
 ): Promise<void> {
   if (new Set(permissions.map(({ moduleId }) => moduleId)).size !== permissions.length) {
     throw new HttpError(400, "Each module can be configured only once.");
+  }
+  if (permissions.some(({ moduleId }) => !manageableModuleIds.has(moduleId))) {
+    throw new HttpError(400, "One or more selected permission modules are unavailable.");
   }
   if (!permissions.length) return;
   const [modules] = await connection.execute<Array<RowDataPacket & { id: string }>>(
@@ -195,10 +213,12 @@ export async function createStaff(input: z.infer<typeof createStaffSchema>, acto
       if (permissions) {
         await validateModuleIds(connection, permissions);
         for (const permission of permissions) {
-          await connection.execute(
-            "INSERT INTO user_permissions (user_id, module_id, allowed) VALUES (?, ?, ?)",
-            [userId, permission.moduleId, permission.allowed],
-          );
+          if (permission.allowed !== null) {
+            await connection.execute(
+              "INSERT INTO user_permissions (user_id, module_id, allowed) VALUES (?, ?, ?)",
+              [userId, permission.moduleId, permission.allowed],
+            );
+          }
         }
       }
       await connection.execute(
@@ -242,6 +262,9 @@ export async function updateStaff(
     if (userId === actor.id && input.role && input.role !== "admin") {
       throw new HttpError(409, "You cannot remove your own administrator role.");
     }
+    if (userId === actor.id && input.isActive === false) {
+      throw new HttpError(409, "You cannot deactivate your own account.");
+    }
 
     const nextBranchId = input.branchId ?? user.branch_id;
     if (input.branchId !== undefined) {
@@ -259,7 +282,11 @@ export async function updateStaff(
       if (!departments[0]) throw new HttpError(404, "Department not found.");
     }
 
-    const removesAdmin = Boolean(user.has_admin) && input.role !== undefined && input.role !== "admin";
+    const removesAdmin = Boolean(user.has_admin) && (
+      input.role !== undefined && input.role !== "admin"
+      || input.isActive === false
+      || nextBranchId !== user.branch_id
+    );
     if (removesAdmin && user.is_active) {
       const [admins] = await connection.execute<Array<RowDataPacket & { count: number }>>(
         `SELECT COUNT(*) AS count FROM users u
@@ -272,7 +299,7 @@ export async function updateStaff(
       }
     }
 
-    const userUpdates: Array<[string, unknown]> = [];
+    const userUpdates: Array<[string, string | number | boolean | null]> = [];
     if (input.name !== undefined) userUpdates.push(["name", input.name]);
     if (input.email !== undefined) userUpdates.push(["email", input.email.trim().toLowerCase()]);
     if (input.username !== undefined) {
@@ -329,13 +356,19 @@ export async function updateStaff(
     const permissions = input.modulePermissions
       ?? input.permissions?.map((moduleId) => ({ moduleId, allowed: true }));
     if (permissions !== undefined) {
+      const targetIsAdmin = input.role === "admin" || (input.role === undefined && Boolean(user.has_admin));
+      if (targetIsAdmin && permissions.some(({ allowed }) => allowed !== null)) {
+        throw new HttpError(409, "Administrator module access is controlled by the locked role defaults.");
+      }
       await validateModuleIds(connection, permissions);
       await connection.execute("DELETE FROM user_permissions WHERE user_id=?", [userId]);
       for (const permission of permissions) {
-        await connection.execute(
-          "INSERT INTO user_permissions (user_id,module_id,allowed) VALUES (?,?,?)",
-          [userId, permission.moduleId, permission.allowed],
-        );
+        if (permission.allowed !== null) {
+          await connection.execute(
+            "INSERT INTO user_permissions (user_id,module_id,allowed) VALUES (?,?,?)",
+            [userId, permission.moduleId, permission.allowed],
+          );
+        }
       }
     }
     await ensureLandingAllowed(
@@ -421,7 +454,9 @@ export async function listRolePermissions() {
   const [roles, modules, permissions] = await Promise.all([
     query<Array<RowDataPacket & { id: number; name: string }>>("SELECT id, name FROM roles ORDER BY name"),
     query<Array<RowDataPacket & { id: string; name: string; route: string; sort_order: number }>>(
-      "SELECT id, name, route, sort_order FROM modules ORDER BY sort_order",
+      `SELECT id, name, route, sort_order FROM modules
+       WHERE id IN (${[...manageableModuleIds].map(() => "?").join(",")}) ORDER BY sort_order`,
+      [...manageableModuleIds],
     ),
     query<Array<RowDataPacket & { role_id: number; module_id: string; allowed: number }>>(
       "SELECT role_id, module_id, allowed FROM role_permissions",
@@ -509,7 +544,10 @@ export async function setStaffStatus(
       "UPDATE users SET is_active = ? WHERE id = ?",
       [isActive, userId],
     );
-    if (!isActive) await connection.execute("DELETE FROM auth_sessions WHERE user_id = ?", [userId]);
+    if (!isActive) {
+      await connection.execute("DELETE FROM auth_sessions WHERE user_id = ?", [userId]);
+      await connection.execute("DELETE FROM pos_sessions WHERE user_id = ?", [userId]);
+    }
     await connection.execute(
       "INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, ?, 'user', ?, ?)",
       [actor.id, isActive ? "staff.activated" : "staff.deactivated", String(userId), JSON.stringify({ isActive })],
