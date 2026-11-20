@@ -380,6 +380,53 @@ a { color: inherit; text-decoration: none; }
 .pos-held-strip strong { font-size: 9px; }
 .pos-held-strip span { grid-row: 2; color: #87938b; font-size: 8px; }
 .pos-held-strip b { grid-row: 1 / 3; grid-column: 2; align-self: center; color: #17633a; font-size: 9px; }
+.pos-only-app { width: 100vw; min-height: 100vh; background: #eef2ee; }
+.pos-only-app .app-frame,
+.pos-only-app .main-area { width: 100%; min-height: 100vh; margin: 0; }
+.pos-only-app .topbar,
+.pos-only-app .sidebar { display: none !important; }
+.pos-dedicated-header { grid-template-columns: 1fr auto auto auto auto auto; gap: 12px; }
+.pos-header-brand { display: grid; gap: 3px; }
+.pos-header-brand strong { font-size: 16px; }
+.pos-header-brand span, .pos-header-cashier span, .pos-header-time span, .pos-header-shift span { color: #b8cbbf; font-size: 8px; text-transform: uppercase; letter-spacing: .5px; }
+.pos-header-cashier, .pos-header-time, .pos-header-shift { display: grid; gap: 3px; min-width: 95px; }
+.pos-header-cashier strong, .pos-header-time strong { font-size: 10px; }
+.pos-header-shift strong { font-size: 9px; color: #f1b2a7; }
+.pos-header-shift strong.open { color: #99d7ae; }
+.pos-header-action, .pos-header-signout { height: 32px; border: 1px solid rgba(255,255,255,.25); border-radius: 4px; background: transparent; color: #fff; padding: 0 10px; font-size: 9px; }
+.pos-header-signout { border-color: #dca59b; color: #ffe9e4; }
+.pos-confirm-screen { position: fixed; z-index: 100; inset: 52px 0 0; display: grid; place-items: center; background: rgba(18,35,25,.42); }
+.pos-confirm-card { width: min(420px, calc(100vw - 32px)); border-radius: 8px; background: #fff; padding: 24px; box-shadow: 0 18px 50px rgba(15,35,22,.25); }
+.pos-confirm-eyebrow { color: #7d947f; font-size: 9px; font-weight: 700; letter-spacing: 1px; }
+.pos-confirm-card h2 { margin: 8px 0; color: #26382d; font: 400 24px Georgia, serif; }
+.pos-confirm-card p { color: #6f7e74; font-size: 11px; line-height: 1.6; }
+.pos-confirm-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 18px; }
+.pos-confirm-actions button { height: 42px; border: 0; border-radius: 4px; font-size: 10px; font-weight: 700; }
+.pos-confirm-actions .confirm { background: #b9473e; color: #fff; }
+.pos-confirm-actions .cancel { background: #edf3ee; color: #31583d; }
+.pos-search-results button.selected { background: #edf5ef; box-shadow: inset 3px 0 #17633a; }
+.pos-close-screen { min-height: 100vh; background: #eef2ee; }
+.pos-close-content { max-width: 980px; margin: 0 auto; padding: 45px 24px; }
+.pos-close-title span { color: #6d8874; font-size: 9px; font-weight: 700; letter-spacing: 1px; }
+.pos-close-title h1 { margin: 8px 0 5px; color: #26382d; font: 400 34px Georgia, serif; }
+.pos-close-title p { color: #7d897f; font-size: 11px; }
+.pos-close-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 25px; }
+.pos-close-metrics div { min-height: 95px; display: grid; align-content: center; gap: 8px; border: 1px solid #dde5df; border-radius: 6px; background: #fff; padding: 14px; }
+.pos-close-metrics span { color: #7b887e; font-size: 9px; text-transform: uppercase; }
+.pos-close-metrics strong { color: #31543b; font-size: 18px; }
+.pos-close-reconcile { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 12px; }
+.pos-close-reconcile > div, .pos-close-reconcile label { min-height: 85px; display: grid; align-content: center; gap: 8px; border: 1px solid #dde5df; border-radius: 6px; background: #fff; padding: 12px; color: #6f7d74; font-size: 9px; }
+.pos-close-reconcile strong { color: #31543b; font-size: 17px; }
+.pos-close-reconcile label input { height: 38px; border: 1px solid #dbe4dc; border-radius: 4px; padding: 0 8px; font-size: 14px; }
+.pos-close-reconcile .negative strong { color: #b9473e; }
+.pos-close-reconcile .positive strong { color: #17633a; }
+.pos-close-actions { display: flex; gap: 8px; margin-top: 16px; }
+.pos-close-actions button { height: 43px; border: 0; border-radius: 4px; padding: 0 14px; font-size: 10px; font-weight: 700; }
+.pos-close-confirm { background: #17633a; color: #fff; }
+.pos-close-confirm:disabled { opacity: .45; }
+.pos-close-back { background: #fff; color: #4b5e51; border: 1px solid #dfe5df !important; }
+.pos-close-loading { margin-top: 25px; padding: 30px; border: 1px solid #dde5df; background: #fff; color: #7d897f; }
+.pos-close-confirm-dialog { position: fixed; inset: 0; }
 .pos-login-page { min-height: calc(100vh - 65px); display: grid; place-items: center; padding: 24px; background: #edf2ee; }
 .pos-login-card { width: min(410px, 100%); border: 1px solid #dfe6df; border-radius: 8px; background: #fff; padding: 28px; box-shadow: 0 16px 35px rgba(27,55,36,.08); }
 .pos-login-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; }

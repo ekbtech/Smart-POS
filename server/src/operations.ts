@@ -1004,14 +1004,18 @@ export async function createCustomer(input: z.infer<typeof customerSchema>, user
 
 export async function getActiveShift(user: OperationUser) {
   const rows = await query<Array<{
-    id: number; opening_cash: string; opened_at: Date; cashier_id: number;
+    id: number; opening_cash: string; opened_at: Date; cashier_id: number; branch_name: string;
   } & RowDataPacket>>(
-    `SELECT id, opening_cash, opened_at, cashier_id FROM cashier_shifts
-     WHERE branch_id = ? AND cashier_id = ? AND status = 'open' LIMIT 1`,
+    `SELECT cs.id, cs.opening_cash, cs.opened_at, cs.cashier_id, b.name AS branch_name
+     FROM cashier_shifts cs JOIN branches b ON b.id = cs.branch_id
+     WHERE cs.branch_id = ? AND cs.cashier_id = ? AND cs.status = 'open' LIMIT 1`,
     [user.branchId, user.id],
   );
   if (!rows[0]) return null;
-  return { id: rows[0].id, openingCash: rows[0].opening_cash, openedAt: rows[0].opened_at.toISOString() };
+  return {
+    id: rows[0].id, openingCash: rows[0].opening_cash,
+    openedAt: rows[0].opened_at.toISOString(), branchName: rows[0].branch_name,
+  };
 }
 
 export async function openShift(input: z.infer<typeof openShiftSchema>, user: OperationUser) {
@@ -1056,6 +1060,65 @@ export async function addCashMovement(input: z.infer<typeof cashMovementSchema>,
     });
     return { id, shiftId };
   });
+}
+
+export async function getShiftCloseSummary(user: OperationUser) {
+  const [shifts] = await query<Array<{
+    id: number; opening_cash: string;
+  } & RowDataPacket>>(
+    "SELECT id, opening_cash FROM cashier_shifts WHERE branch_id = ? AND cashier_id = ? AND status = 'open' LIMIT 1",
+    [user.branchId, user.id],
+  );
+  if (!shifts[0]) throw new HttpError(409, "There is no open cashier shift.");
+  const shiftId = shifts[0].id;
+  const [totals] = await query<Array<{
+    total_sales: string; transaction_count: number;
+  } & RowDataPacket>>(
+    "SELECT COALESCE(SUM(total), 0) AS total_sales, COUNT(*) AS transaction_count FROM sales WHERE shift_id = ? AND status = 'completed'",
+    [shiftId],
+  );
+  const [payments] = await query<Array<{
+    cash_sales: string; card_sales: string; mobile_sales: string;
+  } & RowDataPacket>>(
+    `SELECT
+       COALESCE(SUM(CASE WHEN sp.method = 'cash' THEN sp.amount ELSE 0 END), 0) AS cash_sales,
+       COALESCE(SUM(CASE WHEN sp.method = 'card' THEN sp.amount ELSE 0 END), 0) AS card_sales,
+       COALESCE(SUM(CASE WHEN sp.method = 'mpesa' THEN sp.amount ELSE 0 END), 0) AS mobile_sales
+     FROM sale_payments sp JOIN sales s ON s.id = sp.sale_id
+     WHERE s.shift_id = ? AND s.status = 'completed' AND sp.status = 'completed'`,
+    [shiftId],
+  );
+  const [refunds] = await query<Array<{ refunds: string } & RowDataPacket>>(
+    `SELECT COALESCE(SUM(r.total), 0) AS refunds
+     FROM refunds r JOIN sales s ON s.id = r.sale_id
+     WHERE r.branch_id = ? AND s.shift_id = ? AND r.status = 'completed'`,
+    [user.branchId, shiftId],
+  );
+  const [cashMovements] = await query<Array<{ deposits: string; withdrawals: string } & RowDataPacket>>(
+    `SELECT COALESCE(SUM(CASE WHEN movement_type='deposit' THEN amount ELSE 0 END),0) AS deposits,
+            COALESCE(SUM(CASE WHEN movement_type='withdrawal' THEN amount ELSE 0 END),0) AS withdrawals
+     FROM cash_movements WHERE shift_id=?`,
+    [shiftId],
+  );
+  const [expenses] = await query<Array<{ amount: string } & RowDataPacket>>(
+    "SELECT COALESCE(SUM(amount),0) AS amount FROM expenses WHERE shift_id=? AND payment_method='cash' AND status='approved'",
+    [shiftId],
+  );
+  const expected = new Decimal(shifts[0].opening_cash)
+    .plus(payments[0]?.cash_sales ?? 0)
+    .plus(cashMovements[0]?.deposits ?? 0)
+    .minus(cashMovements[0]?.withdrawals ?? 0)
+    .minus(expenses[0]?.amount ?? 0)
+    .toDecimalPlaces(2);
+  return {
+    totalSales: totals[0]?.total_sales ?? "0.00",
+    cashSales: payments[0]?.cash_sales ?? "0.00",
+    cardSales: payments[0]?.card_sales ?? "0.00",
+    mobileMoneySales: payments[0]?.mobile_sales ?? "0.00",
+    refunds: refunds[0]?.refunds ?? "0.00",
+    transactionCount: Number(totals[0]?.transaction_count ?? 0),
+    expectedCash: expected.toFixed(2),
+  };
 }
 
 export async function closeShift(input: z.infer<typeof closeShiftSchema>, user: OperationUser) {

@@ -20,7 +20,7 @@ import { getBranchReport, parseReportRange } from "./reports.js";
 import {
   addCashMovement, adjustmentSchema, approvePurchaseOrder, cashMovementSchema, closeShift, closeShiftSchema,
   createCustomer, createExpense, createPurchaseOrder, createRefund, createSupplier, customerSchema,
-  decideExpense, expenseDecisionSchema, expenseSchema, getActiveShift, listCustomers, listExpenses,
+  decideExpense, expenseDecisionSchema, expenseSchema,   getActiveShift, getShiftCloseSummary, listCustomers, listExpenses,
   getPurchaseOrder, getStockMovements, listInventory, listPurchaseOrders, listRefunds, listSuppliers, openShift,
   openShiftSchema, purchaseOrderSchema, receivePurchaseOrder, receiveSchema, refundSchema, adjustInventory,
   supplierSchema, completeStockTake, createStockTake, getStockTake, listExpiryBatches, listStockTakes,
@@ -94,7 +94,7 @@ app.post("/api/auth/logout", authenticate, (req, res, next) => void logout(req, 
 app.get("/api/auth/me", authenticate, currentUser);
 app.post("/api/pos/login", loginLimiter, (req, res, next) => void posLogin(req, res).catch(next));
 app.get("/api/pos/session", authenticate, authenticatePos, (req, res) => {
-  res.json({ cashier: req.posUser });
+  res.json({ cashier: { ...req.posUser, username: req.posUser?.posUsername } });
 });
 app.post("/api/pos/logout", authenticate, authenticatePos, (req, res, next) => void posLogout(req, res).catch(next));
 
@@ -490,6 +490,10 @@ app.post("/api/customers", authenticate, requireRoles("admin", "manager", "cashi
 
 app.get("/api/shifts/active", authenticate, (req, res, next) => {
   handleOperation(async () => ({ shift: await getActiveShift(req.user!) }), res, next);
+});
+
+app.get("/api/shifts/close-summary", authenticate, requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+  handleOperation(async () => ({ summary: await getShiftCloseSummary(req.user!) }), res, next);
 });
 
 app.post("/api/shifts/open", authenticate, requireRoles("admin", "manager", "cashier"), (req, res, next) => {

@@ -123,6 +123,13 @@ function AppShell({ user }: { user: User }) {
     "/staff": "Team", "/reports": "Reports",
   };
   const pageLabel = pageLabels[location.pathname];
+  if (isPos) {
+    return (
+      <div className="pos-only-app">
+        <Outlet />
+      </div>
+    );
+  }
   return (
     <div className={`app-frame ${isPos ? "is-pos" : ""}`}>
       <aside className="sidebar">
@@ -1130,8 +1137,8 @@ function PosEntryPage({ user }: { user: User }) {
       setCashier(null);
       setUsername("");
       setPassword("");
-      setMessage("POS session closed. Sign in again to continue.");
-      window.location.assign("/pos");
+      setMessage("");
+      window.location.assign("/");
     },
   });
   const submit = (event: React.FormEvent) => {
@@ -1174,11 +1181,35 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const [checkoutError, setCheckoutError] = useState("");
   const [openingCash, setOpeningCash] = useState("0.00");
   const [amountPaid, setAmountPaid] = useState("");
+  const [selectedSearchIndex, setSelectedSearchIndex] = useState(0);
+  const [shiftCloseOpen, setShiftCloseOpen] = useState(false);
+  const [actualCashCounted, setActualCashCounted] = useState("");
+  const [signOutConfirmOpen, setSignOutConfirmOpen] = useState(false);
+  const [closeShiftConfirmOpen, setCloseShiftConfirmOpen] = useState(false);
   const scannerRef = useRef<HTMLInputElement>(null);
   const idempotencyRef = useRef<string | null>(null);
+  useEffect(() => {
+    window.requestAnimationFrame(() => scannerRef.current?.focus());
+  }, []);
   const activeShift = useQuery({
     queryKey: ["active-shift"],
-    queryFn: async () => (await api.get<{ shift: { id: number; openingCash: string; openedAt: string } | null }>("/shifts/active")).data.shift,
+    queryFn: async () => (await api.get<{ shift: { id: number; openingCash: string; openedAt: string; branchName: string } | null }>("/shifts/active")).data.shift,
+  });
+  const shiftSummary = useQuery({
+    queryKey: ["shift-close-summary"],
+    queryFn: async () => (await api.get<{ summary: {
+      totalSales: string; cashSales: string; cardSales: string; mobileMoneySales: string;
+      refunds: string; transactionCount: number; expectedCash: string;
+    } }>("/shifts/close-summary")).data.summary,
+    enabled: shiftCloseOpen && Boolean(activeShift.data),
+  });
+  const closeShiftMutation = useMutation({
+    mutationFn: () => api.post<{ expected: string; actual: string; variance: string }>("/shifts/close", { actualCash: actualCashCounted }),
+    onSuccess: async () => {
+      await api.post("/pos/logout").catch(() => undefined);
+      window.location.assign("/");
+    },
+    onError: (error) => setCheckoutError(getErrorMessage(error)),
   });
   const heldSalesQuery = useQuery({
     queryKey: ["held-sales"],
@@ -1265,20 +1296,46 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     });
   };
   const scan = async (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setSelectedSearchIndex((index) => Math.min(index + 1, Math.min((productsQuery.data?.length ?? 0) - 1, 7)));
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setSelectedSearchIndex((index) => Math.max(index - 1, 0));
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setSearch("");
+      setSelectedSearchIndex(0);
+      scannerRef.current?.focus();
+      return;
+    }
     if (event.key !== "Enter") return;
-    const code = search.trim();
-    if (!code) return;
     event.preventDefault();
-    setSearch("");
+    const code = search.trim();
+    if (!code) {
+      scannerRef.current?.focus();
+      return;
+    }
     try {
       const { data } = await api.get<{ products: Product[] }>("/products", { params: { search: code } });
-      const match = data.products.find((product) => product.barcode === code || product.sku === code);
-      if (match) addProduct(match);
-      else setCheckoutError(`No product found for “${code}”.`);
+      const exact = data.products.find((product) => product.barcode === code || product.sku === code);
+      const match = exact ?? data.products[selectedSearchIndex] ?? data.products[0];
+      if (match) {
+        addProduct(match);
+        setSearch("");
+        setSelectedSearchIndex(0);
+      } else {
+        setCheckoutError(`No product found for “${code}”.`);
+        setSearch("");
+      }
     } catch (error) {
       setCheckoutError(getErrorMessage(error));
     }
-    scannerRef.current?.focus();
+    window.requestAnimationFrame(() => scannerRef.current?.focus());
   };
   const adjust = (productId: number, amount: number) => setCart((current) => current
     .map((item) => item.product.id === productId
@@ -1305,6 +1362,11 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const changeCents = Math.max(0, amountPaidCents - payableCents);
   useEffect(() => {
     const handleKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "F2") {
+        event.preventDefault();
+        scannerRef.current?.focus();
+        return;
+      }
       if (event.target instanceof HTMLInputElement) return;
       if (event.key === "F3") { event.preventDefault(); scannerRef.current?.focus(); }
       if (event.key === "F4") { event.preventDefault(); scannerRef.current?.focus(); }
@@ -1321,17 +1383,92 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     return () => window.removeEventListener("keydown", handleKey);
   }, [cart.length, canSell, activeShift.data, checkout.isPending, holdSaleMutation, heldSalesQuery]);
 
+  const actualCashNumber = Math.round((Number(actualCashCounted) || 0) * 100);
+  const expectedCashNumber = Math.round(Number(shiftSummary.data?.expectedCash ?? 0) * 100);
+  const cashDifferenceNumber = actualCashNumber - expectedCashNumber;
+
+  if (shiftCloseOpen) {
+    return (
+      <section className="pos-close-screen">
+        <header className="pos-dedicated-header">
+          <div className="pos-header-brand"><strong>Smart POS</strong><span>{activeShift.data?.branchName ?? `Branch ${user.branchId}`}</span></div>
+          <div className="pos-header-cashier"><span>Cashier</span><strong>{cashier.username}</strong></div>
+          <button className="pos-header-action" onClick={() => setShiftCloseOpen(false)}>Back to POS</button>
+        </header>
+        <main className="pos-close-content">
+          <div className="pos-close-title"><span>SHIFT CHANGE</span><h1>Close cashier shift</h1><p>{cashier.name} · {activeShift.data ? `Shift opened ${new Date(activeShift.data.openedAt).toLocaleString("en-KE")}` : "No active shift"}</p></div>
+          {shiftSummary.isPending ? <div className="pos-close-loading">Loading shift totals…</div> : shiftSummary.data ? (
+            <>
+              <div className="pos-close-metrics">
+                <div><span>Total sales</span><strong>{money(shiftSummary.data.totalSales)}</strong></div>
+                <div><span>Cash sales</span><strong>{money(shiftSummary.data.cashSales)}</strong></div>
+                <div><span>Card sales</span><strong>{money(shiftSummary.data.cardSales)}</strong></div>
+                <div><span>Mobile money</span><strong>{money(shiftSummary.data.mobileMoneySales)}</strong></div>
+                <div><span>Refunds</span><strong>{money(shiftSummary.data.refunds)}</strong></div>
+                <div><span>Transactions</span><strong>{shiftSummary.data.transactionCount}</strong></div>
+              </div>
+              <div className="pos-close-reconcile">
+                <div><span>Expected cash</span><strong>{money(shiftSummary.data.expectedCash)}</strong></div>
+                <label>Actual cash counted<input inputMode="decimal" value={actualCashCounted} onChange={(event) => setActualCashCounted(event.target.value)} placeholder="0.00" /></label>
+                <div className={cashDifferenceNumber < 0 ? "negative" : cashDifferenceNumber > 0 ? "positive" : ""}><span>Cash difference</span><strong>{money(cashDifferenceNumber / 100)}</strong></div>
+              </div>
+              <div className="pos-close-actions">
+                <button className="pos-close-confirm" disabled={!/^\d{1,10}(\.\d{1,2})?$/.test(actualCashCounted) || closeShiftMutation.isPending} onClick={() => {
+                  setCloseShiftConfirmOpen(true);
+                }}>{closeShiftMutation.isPending ? "Closing shift…" : "Confirm & close shift"}</button>
+                <button className="pos-close-back" onClick={() => setShiftCloseOpen(false)}>Return to POS</button>
+              </div>
+            </>
+          ) : <div className="pos-close-loading">No open shift is available.</div>}
+          {closeShiftConfirmOpen && <div className="pos-confirm-screen pos-close-confirm-dialog" role="dialog" aria-modal="true">
+            <section className="pos-confirm-card">
+              <span className="pos-confirm-eyebrow">SHIFT CONFIRMATION</span>
+              <h2>Close this shift?</h2>
+              <p>The counted cash and calculated difference will be recorded. Continue to the dashboard after confirmation.</p>
+              <div className="pos-confirm-actions">
+                <button className="confirm" disabled={closeShiftMutation.isPending} onClick={() => closeShiftMutation.mutate()}>{closeShiftMutation.isPending ? "Recording…" : "Confirm close"}</button>
+                <button className="cancel" onClick={() => setCloseShiftConfirmOpen(false)}>Cancel</button>
+              </div>
+            </section>
+          </div>}
+        </main>
+      </section>
+    );
+  }
+
   return (
     <section className="pos-page pos-desktop">
-      <header className="pos-dedicated-header"><div><strong>Smart POS</strong><span>{cashier.name} · {cashier.username}</span></div><button onClick={onLogout}>Logout POS</button></header>
+      <header className="pos-dedicated-header">
+        <div className="pos-header-brand"><strong>Smart POS</strong><span>{activeShift.data?.branchName ?? `Branch ${user.branchId}`}</span></div>
+        <div className="pos-header-cashier"><span>Cashier</span><strong>{cashier.username}</strong></div>
+        <div className="pos-header-time"><span>{new Date().toLocaleDateString("en-KE", { weekday: "short", year: "numeric", month: "short", day: "2-digit" })}</span><strong>{new Date().toLocaleTimeString("en-KE", { hour: "2-digit", minute: "2-digit" })}</strong></div>
+        <div className="pos-header-shift"><span>Shift</span><strong className={activeShift.data ? "open" : "closed"}>{activeShift.data ? "OPEN" : "CLOSED"}</strong></div>
+        <button className="pos-header-action" onClick={() => setShiftCloseOpen(true)}>Shift Change</button>
+        <button className="pos-header-signout" onClick={() => setSignOutConfirmOpen(true)}>Sign Out</button>
+      </header>
+      {signOutConfirmOpen && (
+        <div className="pos-confirm-screen" role="dialog" aria-modal="true">
+          <section className="pos-confirm-card">
+            <span className="pos-confirm-eyebrow">POS SESSION</span>
+            <h2>Sign out of POS?</h2>
+            {cart.length > 0
+              ? <p>Your unfinished sale has {cart.reduce((sum, item) => sum + item.quantity, 0)} item(s). It will be cleared when you sign out.</p>
+              : <p>This will end your dedicated POS session and return you to the main dashboard.</p>}
+            <div className="pos-confirm-actions">
+              <button className="confirm" onClick={() => onLogout()}>Confirm sign out</button>
+              <button className="cancel" onClick={() => setSignOutConfirmOpen(false)}>Continue POS</button>
+            </div>
+          </section>
+        </div>
+      )}
       {toast && <div role="status" className="success-banner"><ShieldCheck size={17} /> {toast}<button onClick={() => setToast("")} aria-label="Dismiss"><X size={15} /></button></div>}
       {checkoutError && <ErrorBanner message={checkoutError} onRetry={() => setCheckoutError("")} />}
       {activeShift.isError && <ErrorBanner message={getErrorMessage(activeShift.error)} onRetry={() => void activeShift.refetch()} />}
       <div className="pos-layout">
         <div className="pos-catalog">
-          <label className="pos-search"><Search size={18} /><input ref={scannerRef} value={search} onKeyDown={scan} onChange={(event) => setSearch(event.target.value)} placeholder="Scan barcode or search product..." autoFocus /><button type="button" onClick={() => scannerRef.current?.focus()}><Barcode size={16} /> Scan</button></label>
+          <label className="pos-search"><Search size={18} /><input ref={scannerRef} value={search} onKeyDown={scan} onChange={(event) => { setSearch(event.target.value); setSelectedSearchIndex(0); }} placeholder="Scan barcode or search product..." autoFocus /><button type="button" onClick={() => scannerRef.current?.focus()}><Barcode size={16} /> Scan</button></label>
           {search.trim() && <div className="pos-search-results">
-            {(productsQuery.data ?? []).slice(0, 8).map((product) => <button key={product.id} onClick={() => { addProduct(product); setSearch(""); }}>
+            {(productsQuery.data ?? []).slice(0, 8).map((product, index) => <button key={product.id} className={index === selectedSearchIndex ? "selected" : ""} onMouseEnter={() => setSelectedSearchIndex(index)} onClick={() => { addProduct(product); setSearch(""); setSelectedSearchIndex(0); window.requestAnimationFrame(() => scannerRef.current?.focus()); }}>
               <span><strong>{product.name}</strong><small>{product.sku} · {product.category}</small></span>
               <b>{money(product.sellingPrice)}</b>
             </button>)}

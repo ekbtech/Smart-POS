@@ -27,7 +27,7 @@ type UserRow = RowDataPacket & {
   is_active: number;
 };
 
-export type AuthUser = { id: number; name: string; email: string; branchId: number; roles: string[] };
+export type AuthUser = { id: number; name: string; email: string; branchId: number; roles: string[]; posUsername?: string };
 declare global {
   namespace Express {
     interface Request {
@@ -234,7 +234,11 @@ export async function authenticatePos(req: Request, res: Response, next: NextFun
       res.status(403).json({ error: "This account is not authorized for POS access." });
       return;
     }
-    req.posUser = { id: rows[0].id, name: rows[0].name, email: rows[0].email, branchId: rows[0].branch_id, roles: roleNames };
+    req.posUser = {
+      id: rows[0].id, name: rows[0].name, email: rows[0].email,
+      branchId: rows[0].branch_id, roles: roleNames,
+      posUsername: rows[0].pos_username,
+    };
     req.posSessionId = sessionId;
     await execute("UPDATE pos_sessions SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?", [sessionId]);
     next();
