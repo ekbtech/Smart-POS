@@ -27,6 +27,11 @@ const greeting = new Intl.DateTimeFormat("en-KE", { weekday: "long", month: "lon
 const timeGreeting = new Date().getHours() < 12 ? "Good morning" : new Date().getHours() < 17 ? "Good afternoon" : "Good evening";
 const dateInputValue = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 
+function PermissionRoute({ module, user, children }: { module: string; user: User; children: ReactNode }) {
+  if (user.modules?.includes(module)) return <>{children}</>;
+  return <Navigate to="/" replace />;
+}
+
 function App() {
   const query = useQueryClient();
   const me = useQuery({
@@ -40,18 +45,18 @@ function App() {
   return (
     <Routes>
       <Route element={<AppShell user={me.data} />}>
-        <Route index element={<DashboardPage user={me.data} />} />
-        <Route path="/pos" element={<PosEntryPage user={me.data} />} />
-        <Route path="/products" element={<ProductsPage user={me.data} />} />
-        <Route path="/inventory" element={<InventoryPage user={me.data} />} />
-        <Route path="/suppliers" element={<SuppliersPage user={me.data} />} />
-        <Route path="/purchases" element={<PurchasesPage user={me.data} />} />
-        <Route path="/customers" element={<CustomersPage user={me.data} />} />
-        <Route path="/staff" element={<StaffPage user={me.data} />} />
-        <Route path="/shifts" element={<ShiftsPage user={me.data} />} />
-        <Route path="/expenses" element={<ExpensesPage user={me.data} />} />
-        <Route path="/reports" element={<ReportsPage user={me.data} />} />
-        <Route path="/sales" element={<SalesPage user={me.data} />} />
+        <Route index element={<PermissionRoute module="dashboard" user={me.data}><DashboardPage user={me.data} /></PermissionRoute>} />
+        <Route path="/pos" element={<PermissionRoute module="pos" user={me.data}><PosEntryPage user={me.data} /></PermissionRoute>} />
+        <Route path="/products" element={<PermissionRoute module="products" user={me.data}><ProductsPage user={me.data} /></PermissionRoute>} />
+        <Route path="/inventory" element={<PermissionRoute module="inventory" user={me.data}><InventoryPage user={me.data} /></PermissionRoute>} />
+        <Route path="/suppliers" element={<PermissionRoute module="suppliers" user={me.data}><SuppliersPage user={me.data} /></PermissionRoute>} />
+        <Route path="/purchases" element={<PermissionRoute module="purchases" user={me.data}><PurchasesPage user={me.data} /></PermissionRoute>} />
+        <Route path="/customers" element={<PermissionRoute module="customers" user={me.data}><CustomersPage user={me.data} /></PermissionRoute>} />
+        <Route path="/staff" element={<PermissionRoute module="employees" user={me.data}><StaffPage user={me.data} /></PermissionRoute>} />
+        <Route path="/shifts" element={<PermissionRoute module="shifts" user={me.data}><ShiftsPage user={me.data} /></PermissionRoute>} />
+        <Route path="/expenses" element={<PermissionRoute module="expenses" user={me.data}><ExpensesPage user={me.data} /></PermissionRoute>} />
+        <Route path="/reports" element={<PermissionRoute module="reports" user={me.data}><ReportsPage user={me.data} /></PermissionRoute>} />
+        <Route path="/sales" element={<PermissionRoute module="sales" user={me.data}><SalesPage user={me.data} /></PermissionRoute>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
@@ -61,48 +66,64 @@ function App() {
 function LoginPage({ onLogin }: { onLogin: (user: User) => void }) {
   const navigate = useNavigate();
   const [message, setMessage] = useState("");
-  const schema = z.object({ email: z.email(), password: z.string().min(1) });
+  const [showPassword, setShowPassword] = useState(false);
+  const schema = z.object({ identifier: z.string().trim().min(1, "Username or email is required."), password: z.string().min(1, "Password is required.") });
   type LoginValues = z.infer<typeof schema>;
-  const form = useForm<LoginValues>({ resolver: zodResolver(schema), defaultValues: { email: "", password: "" } });
+  const form = useForm<LoginValues>({ resolver: zodResolver(schema), defaultValues: { identifier: "", password: "" } });
   const login = useMutation({
     mutationFn: async (values: LoginValues) => (await api.post<{ user: User }>("/auth/login", values)).data.user,
     onSuccess: (user) => {
       onLogin(user);
-      navigate("/");
+      const routeMap: Record<string, string> = {
+        dashboard: "/", pos: "/pos", sales: "/sales", products: "/products",
+        inventory: "/inventory", purchases: "/purchases", suppliers: "/suppliers",
+        customers: "/customers", employees: "/staff", expenses: "/expenses",
+        shifts: "/shifts", reports: "/reports", permissions: "/staff",
+        settings: "/staff", audit: "/staff",
+      };
+      let landing = "/";
+      if (user.roles.includes("cashier") && user.modules?.includes("pos")) {
+        landing = "/pos";
+      } else if (user.defaultLanding) {
+        const moduleId = user.defaultLanding.replace("/", "");
+        if (user.modules?.includes(moduleId)) landing = user.defaultLanding;
+      }
+      if (!landing || landing === "/" && !user.modules?.includes("dashboard")) {
+        const fallback = user.modules?.find((moduleId) => routeMap[moduleId]);
+        landing = fallback ? routeMap[fallback] : "/";
+      }
+      navigate(landing);
     },
     onError: (error) => setMessage(getErrorMessage(error)),
   });
   return (
     <main className="login-page">
-      <div className="login-art">
-        <div className="login-logo"><span className="brand-mark">s</span><strong>smart<span>pos</span></strong></div>
-        <div className="art-copy">
-          <div className="eyebrow"><span className="eyebrow-dot" /> RETAIL, IN GOOD ORDER</div>
-          <h1>Everything in<br />its right place.</h1>
-          <p>One calm, considered workspace for the people who keep your store moving.</p>
+      <section className="login-card" aria-labelledby="login-title">
+        <div className="login-brand">
+          <span className="brand-mark" aria-hidden="true">s</span>
+          <strong>Smart<span> POS</span></strong>
         </div>
-        <div className="art-note"><span>01 — YOUR STORE, AT A GLANCE</span><span>MADE FOR THE EVERYDAY</span></div>
-      </div>
-      <section className="login-form-wrap">
         <div className="login-form">
-          <div className="mobile-login-brand"><span className="brand-mark">s</span><strong>smart<span>pos</span></strong></div>
-          <div className="form-eyebrow">WELCOME BACK</div>
-          <h2>Sign in to your store</h2>
-          <p className="form-description">Use your work email to continue.</p>
+          <h1 id="login-title">Sign in</h1>
+          <p className="form-description">Enter your account details to continue.</p>
           <form onSubmit={form.handleSubmit((values) => { setMessage(""); login.mutate(values); })}>
-            <label className="field-label" htmlFor="email">Work email</label>
-            <input id="email" type="email" autoComplete="username" placeholder="you@yourstore.co.ke" {...form.register("email")} />
-            {form.formState.errors.email && <small className="field-error">{form.formState.errors.email.message}</small>}
+            <label className="field-label" htmlFor="identifier">Username or email</label>
+            <input id="identifier" type="text" autoComplete="username" autoFocus placeholder="Enter username or email" {...form.register("identifier")} />
+            {form.formState.errors.identifier && <small className="field-error">{form.formState.errors.identifier.message}</small>}
             <label className="field-label password-label" htmlFor="password">Password</label>
-            <input id="password" type="password" autoComplete="current-password" placeholder="Enter your password" {...form.register("password")} />
+            <div className="login-password-row">
+              <input id="password" type={showPassword ? "text" : "password"} autoComplete="current-password" placeholder="Enter password" {...form.register("password")} />
+              <button type="button" aria-label={showPassword ? "Hide password" : "Show password"} aria-pressed={showPassword} onClick={() => setShowPassword((visible) => !visible)}>{showPassword ? "Hide" : "Show"}</button>
+            </div>
+            {form.formState.errors.password && <small className="field-error">{form.formState.errors.password.message}</small>}
             {message && <div role="alert" className="error-banner">{message}</div>}
             <button className="button button-dark login-submit" disabled={login.isPending}>
-              {login.isPending ? "Signing in…" : "Continue"} <ArrowUpRight size={17} />
+              {login.isPending ? "Signing in…" : "Sign in"}
             </button>
           </form>
-          <div className="secure-note"><ShieldCheck size={15} /> Your sign-in is protected with secure sessions.</div>
+          <div className="secure-note"><ShieldCheck size={15} /> Secure access to your Smart POS account</div>
         </div>
-        <footer className="login-footer"><span>SMART POS · RETAIL OPERATIONS</span><span>BUILT FOR BETTER BUSINESS</span></footer>
+        <footer className="login-footer">Smart POS · Retail management</footer>
       </section>
     </main>
   );
@@ -137,18 +158,19 @@ function AppShell({ user }: { user: User }) {
         <div className="branch-switcher"><div className="branch-avatar">M</div><div><strong>Main branch</strong><small>Retail workspace</small></div><ChevronDown size={15} /></div>
         <div className="nav-caption">WORKSPACE</div>
         <nav className="nav-list">
-          <NavLink to="/" end className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><LayoutDashboard size={18} /> Overview</NavLink>
-          <NavLink to="/pos" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><ShoppingBasket size={18} /> Point of sale <span className="nav-shortcut">F2</span></NavLink>
-          <NavLink to="/products" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Boxes size={18} /> Products</NavLink>
-          <NavLink to="/inventory" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><ArrowLeftRight size={18} /> Inventory</NavLink>
-          <NavLink to="/purchases" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Truck size={18} /> Purchasing</NavLink>
-          <NavLink to="/customers" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Users size={18} /> Customers</NavLink>
-          {user.roles.some((role) => ["admin", "manager"].includes(role)) && <NavLink to="/staff" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Users size={18} /> Team</NavLink>}
-          <NavLink to="/shifts" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Banknote size={18} /> Cashier shifts</NavLink>
-          <NavLink to="/expenses" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><ReceiptText size={18} /> Expenses</NavLink>
-          {user.roles.some((role) => ["admin", "manager", "accountant"].includes(role)) &&
-            <NavLink to="/reports" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><TrendingUp size={18} /> Reports</NavLink>}
-          <NavLink to="/sales" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><RotateCcw size={18} /> Sales & returns</NavLink>
+          {user.modules?.includes("dashboard") && <NavLink to="/" end className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><LayoutDashboard size={18} /> Overview</NavLink>}
+          {user.modules?.includes("pos") && <NavLink to="/pos" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><ShoppingBasket size={18} /> Point of sale <span className="nav-shortcut">F2</span></NavLink>}
+          {user.modules?.includes("products") && <NavLink to="/products" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Boxes size={18} /> Products</NavLink>}
+          {user.modules?.includes("inventory") && <NavLink to="/inventory" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><ArrowLeftRight size={18} /> Inventory</NavLink>}
+          {user.modules?.includes("purchases") && <NavLink to="/purchases" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Truck size={18} /> Purchasing</NavLink>}
+          {user.modules?.includes("suppliers") && <NavLink to="/suppliers" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Users size={18} /> Suppliers</NavLink>}
+          {user.modules?.includes("customers") && <NavLink to="/customers" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Users size={18} /> Customers</NavLink>}
+          {user.modules?.includes("employees") && <NavLink to="/staff" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Users size={18} /> Team</NavLink>}
+          {user.modules?.includes("shifts") && <NavLink to="/shifts" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Banknote size={18} /> Cashier shifts</NavLink>}
+          {user.modules?.includes("expenses") && <NavLink to="/expenses" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><ReceiptText size={18} /> Expenses</NavLink>}
+          {user.modules?.includes("reports") && <NavLink to="/reports" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><TrendingUp size={18} /> Reports</NavLink>}
+          {user.modules?.includes("sales") && <NavLink to="/sales" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><RotateCcw size={18} /> Sales & returns</NavLink>}
+          {(user.modules?.includes("permissions") || user.modules?.includes("employees")) && <NavLink to="/staff" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><ShieldCheck size={18} /> User management</NavLink>}
         </nav>
         <div className="sidebar-bottom">
           <div className="help-card"><div className="help-icon"><Command size={17} /></div><strong>Need a hand?</strong><p>Your store tools, all in one place.</p></div>

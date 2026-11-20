@@ -6,7 +6,7 @@ import { rateLimit } from "express-rate-limit";
 import helmet from "helmet";
 import { ZodError } from "zod";
 import {
-  authenticate, authenticatePos, currentUser, login, logout, posLogin, posLogout, requireRoles,
+  authenticate, authenticatePos, currentUser, login, logout, posLogin, posLogout, requireRoles, requireModule,
 } from "./auth.js";
 import { pool, query } from "./db.js";
 import { createSale, saleSchema, heldSaleSchema, holdSale, listHeldSales, retrieveHeldSale } from "./sales.js";
@@ -98,6 +98,76 @@ app.get("/api/pos/session", authenticate, authenticatePos, (req, res) => {
 });
 app.post("/api/pos/logout", authenticate, authenticatePos, (req, res, next) => void posLogout(req, res).catch(next));
 
+app.get("/api/access/modules", authenticate, requireRoles("admin"), async (_req, res, next) => {
+  try {
+    res.json({ modules: await query<Array<{ id: string; name: string; route: string; sort_order: number } & import("mysql2").RowDataPacket>>(
+      "SELECT id, name, route, sort_order FROM modules ORDER BY sort_order",
+    ).then((rows) => rows.map((row) => ({
+      id: row.id, name: row.name, route: row.route, sortOrder: row.sort_order,
+    }))) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/access/users/:id", authenticate, requireRoles("admin"), async (req, res, next) => {
+  const id = positiveId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid user ID." }); return; }
+  try {
+    const [users, overrides] = await Promise.all([
+      query<Array<{ id: number; default_landing: string | null } & import("mysql2").RowDataPacket>>(
+        "SELECT id, default_landing FROM users WHERE id=? LIMIT 1",
+        [id],
+      ),
+      query<Array<{ module_id: string; allowed: number } & import("mysql2").RowDataPacket>>(
+        "SELECT module_id, allowed FROM user_permissions WHERE user_id=?",
+        [id],
+      ),
+    ]);
+    if (!users[0]) { res.status(404).json({ error: "User not found." }); return; }
+    res.json({ defaultLanding: users[0].default_landing, permissions: overrides.map((item) => ({ moduleId: item.module_id, allowed: Boolean(item.allowed) })) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/access/users/:id", authenticate, requireRoles("admin"), async (req, res, next) => {
+  const id = positiveId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid user ID." }); return; }
+  const defaultLanding = typeof req.body.defaultLanding === "string" ? req.body.defaultLanding.trim().slice(0, 80) : null;
+  const permissions = Array.isArray(req.body.permissions) ? req.body.permissions : null;
+  if (!permissions || !permissions.every((item: unknown) =>
+    typeof item === "object" && item !== null
+      && typeof (item as { moduleId?: unknown }).moduleId === "string"
+      && typeof (item as { allowed?: unknown }).allowed === "boolean")) {
+    res.status(400).json({ error: "Provide module permission overrides." });
+    return;
+  }
+  try {
+    await pool.execute("UPDATE users SET default_landing=? WHERE id=?", [defaultLanding, id]);
+    await pool.execute("DELETE FROM user_permissions WHERE user_id=?", [id]);
+    for (const item of permissions as Array<{ moduleId: string; allowed: boolean }>) {
+      const [modules] = await pool.execute<Array<import("mysql2").RowDataPacket & { id: string }>>(
+        "SELECT id FROM modules WHERE id=? LIMIT 1",
+        [item.moduleId],
+      );
+      if (modules[0]) {
+        await pool.execute(
+          "INSERT INTO user_permissions (user_id,module_id,allowed) VALUES (?,?,?)",
+          [id, item.moduleId, item.allowed],
+        );
+      }
+    }
+    await pool.execute(
+      "INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, 'permissions.updated', 'user', ?, ?)",
+      [req.user!.id, String(id), JSON.stringify({ defaultLanding, permissions })],
+    );
+    res.json({ updated: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/staff/departments", authenticate, requireRoles("admin", "manager"), async (_req, res, next) => {
   try {
     res.json({ departments: await listDepartments() });
@@ -106,7 +176,7 @@ app.get("/api/staff/departments", authenticate, requireRoles("admin", "manager")
   }
 });
 
-app.get("/api/staff", authenticate, requireRoles("admin", "manager"), async (req, res, next) => {
+app.get("/api/staff", authenticate, requireModule("employees"), requireRoles("admin", "manager"), async (req, res, next) => {
   try {
     const search = typeof req.query.search === "string" ? req.query.search.trim().slice(0, 100) : "";
     const users = await listStaff(req.user!.branchId, search);
@@ -122,13 +192,16 @@ app.get("/api/staff", authenticate, requireRoles("admin", "manager"), async (req
       hiredAt: user.hired_at?.toISOString().slice(0, 10) ?? null,
       roles: user.roles ? user.roles.split(",") : [],
       lastLogin: user.last_login?.toISOString() ?? null,
+      username: user.username,
+      defaultLanding: user.default_landing,
+      permissions: user.permissions ? user.permissions.split(",").filter(Boolean) : [],
     })) });
   } catch (error) {
     next(error);
   }
 });
 
-app.post("/api/staff", authenticate, requireRoles("admin", "manager"), (req, res, next) => {
+app.post("/api/staff", authenticate, requireModule("employees"), requireRoles("admin", "manager"), (req, res, next) => {
   try {
     const input = createStaffSchema.parse(req.body);
     if (!canAssignStaffRole(req.user!, input.role)) {
@@ -158,7 +231,7 @@ app.patch("/api/staff/:id/status", authenticate, requireRoles("admin"), (req, re
   }
 });
 
-app.get("/api/products", authenticate, async (req, res, next) => {
+app.get("/api/products", authenticate, requireModule("products"), async (req, res, next) => {
   try {
     const search = typeof req.query.search === "string" ? req.query.search.trim().slice(0, 100) : "";
     const products = await query<Array<{
@@ -222,7 +295,7 @@ app.patch("/api/products/:id", authenticate, requireRoles("admin", "manager", "i
   }
 });
 
-app.get("/api/inventory", authenticate, async (req, res, next) => {
+app.get("/api/inventory", authenticate, requireModule("inventory"), async (req, res, next) => {
   try {
     const search = typeof req.query.search === "string" ? req.query.search.trim().slice(0, 100) : "";
     const [items, movements] = await Promise.all([
@@ -398,7 +471,7 @@ app.post("/api/inventory/adjustments", authenticate, requireRoles("admin", "mana
   }
 });
 
-app.get("/api/suppliers", authenticate, async (_req, res, next) => {
+app.get("/api/suppliers", authenticate, requireModule("suppliers"), async (_req, res, next) => {
   try {
     const suppliers = await listSuppliers();
     res.json({ suppliers: suppliers.map((supplier) => ({
@@ -465,7 +538,7 @@ app.post("/api/purchase-orders/:id/receive", authenticate, requireRoles("admin",
   }
 });
 
-app.get("/api/customers", authenticate, async (req, res, next) => {
+app.get("/api/customers", authenticate, requireModule("customers"), async (req, res, next) => {
   try {
     const search = typeof req.query.search === "string" ? req.query.search.trim().slice(0, 100) : "";
     const customers = await listCustomers(search);
@@ -488,7 +561,7 @@ app.post("/api/customers", authenticate, requireRoles("admin", "manager", "cashi
   }
 });
 
-app.get("/api/shifts/active", authenticate, (req, res, next) => {
+app.get("/api/shifts/active", authenticate, requireModule("shifts"), (req, res, next) => {
   handleOperation(async () => ({ shift: await getActiveShift(req.user!) }), res, next);
 });
 
@@ -523,7 +596,7 @@ app.post("/api/shifts/close", authenticate, requireRoles("admin", "manager", "ca
   }
 });
 
-app.get("/api/expenses", authenticate, async (req, res, next) => {
+app.get("/api/expenses", authenticate, requireModule("expenses"), async (req, res, next) => {
   try {
     const expenses = await listExpenses(req.user!.branchId);
     res.json({ expenses: expenses.map((expense) => ({
@@ -569,7 +642,7 @@ app.get("/api/refunds", authenticate, async (req, res, next) => {
   }
 });
 
-app.get("/api/reports/summary", authenticate, requireRoles("admin", "manager", "accountant"), (req, res, next) => {
+app.get("/api/reports/summary", authenticate, requireModule("reports"), requireRoles("admin", "manager", "accountant"), (req, res, next) => {
   try {
     const range = parseReportRange(req.query);
     handleOperation(() => getBranchReport(req.user!.branchId, range), res, next);
@@ -578,7 +651,7 @@ app.get("/api/reports/summary", authenticate, requireRoles("admin", "manager", "
   }
 });
 
-app.get("/api/sales", authenticate, async (req, res, next) => {
+app.get("/api/sales", authenticate, requireModule("sales"), async (req, res, next) => {
   try {
     const sales = await query<Array<{
       id: number; receipt_number: string; total: string; status: string; created_at: Date; cashier: string;
@@ -674,7 +747,7 @@ app.post("/api/sales/:id/refunds", authenticate, requireRoles("admin", "manager"
   }
 });
 
-app.get("/api/dashboard/summary", authenticate, async (req, res, next) => {
+app.get("/api/dashboard/summary", authenticate, requireModule("dashboard"), async (req, res, next) => {
   try {
     const branchId = req.user!.branchId;
     const [summary, recentSales, lowStockProducts, lowStockCounts, productCounts] = await Promise.all([

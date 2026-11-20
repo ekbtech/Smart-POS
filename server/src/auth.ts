@@ -22,12 +22,21 @@ type UserRow = RowDataPacket & {
   id: number;
   name: string;
   email: string;
+  username: string | null;
   branch_id: number;
   password_hash: string;
+  pos_username: string | null;
+  default_landing: string | null;
+  must_change_password: number;
+  main_failed_attempts: number;
+  main_locked_until: Date | null;
   is_active: number;
 };
 
-export type AuthUser = { id: number; name: string; email: string; branchId: number; roles: string[]; posUsername?: string };
+export type AuthUser = {
+  id: number; name: string; email: string; branchId: number; roles: string[];
+  posUsername?: string; modules?: string[]; defaultLanding?: string;
+};
 declare global {
   namespace Express {
     interface Request {
@@ -40,7 +49,7 @@ declare global {
 }
 
 const loginSchema = z.object({
-  email: z.email().max(254),
+  identifier: z.string().trim().min(1).max(254),
   password: z.string().min(1).max(200),
 });
 export const posLoginSchema = z.object({
@@ -50,20 +59,82 @@ export const posLoginSchema = z.object({
 
 export async function login(req: Request, res: Response): Promise<void> {
   const input = loginSchema.parse(req.body);
+  const identifier = input.identifier.toLowerCase();
+  const isEmail = identifier.includes("@");
   const [users] = await pool.execute<UserRow[]>(
-    "SELECT id, name, email, branch_id, password_hash, is_active FROM users WHERE email = ? LIMIT 1",
-    [input.email.toLowerCase()],
+    `SELECT id, name, email, username, pos_username, branch_id, password_hash,
+            default_landing, must_change_password, main_failed_attempts,
+            main_locked_until, is_active
+     FROM users WHERE ${isEmail ? "email" : "username"} = ? LIMIT 1`,
+    [identifier],
   );
   const user = users[0];
-  if (!user || !user.is_active || !(await bcrypt.compare(input.password, user.password_hash))) {
-    res.status(401).json({ error: "Email or password is incorrect." });
+  if (!user || !user.is_active) {
+    res.status(401).json({ error: "Username/email or password is incorrect." });
     return;
   }
-
   const roles = await query<Array<{ name: string } & import("mysql2").RowDataPacket>>(
     "SELECT r.name FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = ?",
     [user.id],
   );
+  const roleNames = roles.map((role) => role.name);
+  if (isEmail && !roleNames.includes("admin")) {
+    res.status(403).json({ error: "Email login is available only to administrator accounts." });
+    return;
+  }
+  if (!isEmail && roleNames.includes("admin")) {
+    res.status(403).json({ error: "Administrator accounts must sign in with their email address." });
+    return;
+  }
+  if (user.main_locked_until && new Date(user.main_locked_until).getTime() > Date.now()) {
+    res.status(423).json({ error: "This account is temporarily locked. Try again later." });
+    return;
+  }
+  if (!(await bcrypt.compare(input.password, user.password_hash))) {
+    const attempts = Number(user.main_failed_attempts ?? 0) + 1;
+    if (attempts >= 5) {
+      await execute(
+        "UPDATE users SET main_failed_attempts=?, main_locked_until=DATE_ADD(NOW(), INTERVAL 15 MINUTE) WHERE id=?",
+        [attempts, user.id],
+      );
+    } else {
+      await execute("UPDATE users SET main_failed_attempts=? WHERE id=?", [attempts, user.id]);
+    }
+    await execute(
+      "INSERT INTO login_history (user_id, identifier, success, ip_address, user_agent) VALUES (?, ?, FALSE, ?, ?)",
+      [user.id, identifier, req.ip ?? null, req.get("user-agent")?.slice(0, 500) ?? null],
+    );
+    res.status(attempts >= 5 ? 423 : 401).json({
+      error: attempts >= 5
+        ? "Too many failed attempts. This account is locked for 15 minutes."
+        : "Username/email or password is incorrect.",
+    });
+    return;
+  }
+  await execute(
+    "UPDATE users SET main_failed_attempts=0, main_locked_until=NULL WHERE id=?",
+    [user.id],
+  );
+  await execute(
+    "INSERT INTO login_history (user_id, identifier, success, ip_address, user_agent) VALUES (?, ?, TRUE, ?, ?)",
+    [user.id, identifier, req.ip ?? null, req.get("user-agent")?.slice(0, 500) ?? null],
+  );
+  const [rolePermissions] = await pool.execute<Array<RowDataPacket & { module_id: string }>>(
+    `SELECT DISTINCT rp.module_id FROM role_permissions rp
+     JOIN user_roles ur ON ur.role_id=rp.role_id
+     WHERE ur.user_id=? AND rp.allowed=TRUE`,
+    [user.id],
+  );
+  const [userOverrides] = await pool.execute<Array<RowDataPacket & { module_id: string; allowed: number }>>(
+    "SELECT module_id, allowed FROM user_permissions WHERE user_id=?",
+    [user.id],
+  );
+  const modules = new Set(rolePermissions.map((row) => row.module_id));
+  for (const override of userOverrides) {
+    if (override.allowed) modules.add(override.module_id);
+    else modules.delete(override.module_id);
+  }
+  const moduleIds = [...modules];
   const sessionId = randomUUID();
   const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000);
   await execute("INSERT INTO auth_sessions (id, user_id, expires_at) VALUES (?, ?, ?)", [
@@ -83,7 +154,18 @@ export async function login(req: Request, res: Response): Promise<void> {
     expires: expiresAt,
     path: "/",
   });
-  res.json({ user: { id: user.id, name: user.name, email: user.email, branchId: user.branch_id, roles: roles.map((role) => role.name) } });
+  const defaultLanding = user.default_landing
+    || (roleNames.includes("cashier") ? "/pos"
+      : roleNames.includes("inventory_manager") ? "/inventory"
+        : roleNames.includes("procurement_officer") ? "/purchases"
+          : roleNames.includes("accountant") ? "/reports" : "/");
+  res.json({
+    user: {
+      id: user.id, name: user.name, email: user.email, username: user.username,
+      branchId: user.branch_id, roles: roleNames, modules: moduleIds,
+      defaultLanding, mustChangePassword: Boolean(user.must_change_password),
+    },
+  });
 }
 
 export async function authenticate(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -114,12 +196,35 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
       "SELECT r.name FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = ?",
       [rows[0].id],
     );
+    const [rolePermissions] = await pool.execute<Array<RowDataPacket & { module_id: string }>>(
+      `SELECT DISTINCT rp.module_id FROM role_permissions rp
+       JOIN user_roles ur ON ur.role_id=rp.role_id
+       WHERE ur.user_id=? AND rp.allowed=TRUE`,
+      [rows[0].id],
+    );
+    const [userOverrides] = await pool.execute<Array<RowDataPacket & { module_id: string; allowed: number }>>(
+      "SELECT module_id, allowed FROM user_permissions WHERE user_id=?",
+      [rows[0].id],
+    );
+    const modules = new Set(rolePermissions.map((row) => row.module_id));
+    for (const override of userOverrides) {
+      if (override.allowed) modules.add(override.module_id);
+      else modules.delete(override.module_id);
+    }
+    const [profileRows] = await pool.execute<Array<UserRow & RowDataPacket>>(
+      "SELECT username, default_landing, must_change_password, pos_username FROM users WHERE id=? LIMIT 1",
+      [rows[0].id],
+    );
+    const profile = profileRows[0];
     req.user = {
       id: rows[0].id,
       name: rows[0].name,
       email: rows[0].email,
       branchId: rows[0].branch_id,
       roles: roles.map((role) => role.name),
+      modules: [...modules],
+      defaultLanding: profile?.default_landing ?? undefined,
+      posUsername: profile?.pos_username ?? undefined,
     };
     req.sessionId = claims.sid;
     next();
@@ -132,6 +237,16 @@ export function requireRoles(...allowed: string[]) {
   return (req: Request, res: Response, next: NextFunction): void => {
     if (!req.user || !req.user.roles.some((role) => allowed.includes(role))) {
       res.status(403).json({ error: "You do not have permission to perform this action." });
+      return;
+    }
+    next();
+  };
+}
+
+export function requireModule(moduleId: string) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    if (!req.user?.modules?.includes(moduleId)) {
+      res.status(403).json({ error: "You do not have permission to access this module." });
       return;
     }
     next();

@@ -7,10 +7,10 @@ The API is served under `/api`. Browser requests use an HttpOnly, SameSite=Lax s
 ### `POST /auth/login`
 
 ```json
-{ "email": "admin@example.com", "password": "your-password" }
+{ "identifier": "admin@example.com", "password": "your-password" }
 ```
 
-On success, sets the `smart_pos_session` cookie and returns the user profile and role names. Login is rate limited.
+Use an administrator email or staff username in `identifier`. On success, sets the `smart_pos_session` cookie and returns roles, effective modules and the authorized default landing page. Login is rate limited and account lockout is enforced after repeated failures.
 
 ### `GET /auth/me`
 
@@ -27,6 +27,14 @@ Revokes the server-side session and clears the cookie.
 - `POST /pos/logout` — revokes the dedicated POS session and records a POS logout audit event.
 
 POS sales, held-sale listing, hold and retrieval require both the main authenticated session and an active dedicated POS session. A POS session is independent of the main application login and must be repeated after logout or expiry.
+
+## Access permissions
+
+- `GET /access/modules` — administrator-only module catalog.
+- `GET /access/users/:id` — administrator-only individual module overrides and default landing page.
+- `PUT /access/users/:id` — administrator-only update of default landing page and module overrides.
+
+The sidebar and frontend routes consume effective modules. Backend APIs independently enforce module middleware and role middleware.
 
 ## Dashboard and catalogue
 

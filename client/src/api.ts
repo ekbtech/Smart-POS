@@ -10,8 +10,12 @@ export type User = {
   id: number;
   name: string;
   email: string;
+  username?: string;
   roles: string[];
   branchId: number;
+  modules?: string[];
+  defaultLanding?: string;
+  mustChangePassword?: boolean;
 };
 
 export type Product = {

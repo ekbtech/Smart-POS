@@ -17,8 +17,11 @@ export const staffRoles = [
 export const createStaffSchema = z.object({
   name: z.string().trim().min(2).max(150),
   email: z.email().max(254),
+  username: z.string().trim().min(4).max(100).regex(/^[A-Za-z0-9._-]+$/).optional(),
   password: z.string().min(12).max(200),
   role: z.enum(staffRoles),
+  defaultLanding: z.string().trim().min(1).max(80).optional(),
+  permissions: z.array(z.string().min(1).max(40)).optional(),
   departmentId: z.number().int().positive().nullable().optional(),
   jobTitle: z.string().trim().max(120).optional(),
   phone: z.string().trim().max(40).optional(),
@@ -46,10 +49,14 @@ export async function listStaff(branchId: number, search: string) {
     hired_at: Date | null;
     roles: string;
     last_login: Date | null;
+    username: string | null;
+    default_landing: string | null;
+    permissions: string;
   } & RowDataPacket>>(
-    `SELECT u.id, u.name, u.email, u.is_active, u.created_at, d.name AS department,
+    `SELECT u.id, u.name, u.email, u.username, u.default_landing, u.is_active, u.created_at, d.name AS department,
             e.job_title, e.phone, e.hired_at,
             COALESCE(GROUP_CONCAT(DISTINCT r.name ORDER BY r.name SEPARATOR ','), '') AS roles,
+            COALESCE(GROUP_CONCAT(DISTINCT CASE WHEN up.allowed=TRUE THEN up.module_id END SEPARATOR ','), '') AS permissions,
             (SELECT MAX(a.created_at) FROM audit_logs a
              WHERE a.user_id = u.id AND a.action = 'auth.login') AS last_login
      FROM users u
@@ -57,8 +64,9 @@ export async function listStaff(branchId: number, search: string) {
      LEFT JOIN departments d ON d.id = e.department_id
      LEFT JOIN user_roles ur ON ur.user_id = u.id
      LEFT JOIN roles r ON r.id = ur.role_id
+     LEFT JOIN user_permissions up ON up.user_id = u.id
      WHERE u.branch_id = ? AND (? = '' OR u.name LIKE CONCAT('%', ?, '%') OR u.email LIKE CONCAT('%', ?, '%'))
-     GROUP BY u.id, u.name, u.email, u.is_active, u.created_at, d.name, e.job_title, e.phone, e.hired_at
+     GROUP BY u.id, u.name, u.email, u.username, u.default_landing, u.is_active, u.created_at, d.name, e.job_title, e.phone, e.hired_at
      ORDER BY u.name LIMIT 250`,
     [branchId, search, search, search],
   );
@@ -86,8 +94,15 @@ export async function createStaff(input: z.infer<typeof createStaffSchema>, acto
 
     try {
       const [result] = await connection.execute(
-        "INSERT INTO users (branch_id, name, email, password_hash) VALUES (?, ?, ?, ?)",
-        [actor.branchId, input.name, input.email.trim().toLowerCase(), passwordHash],
+        `INSERT INTO users (branch_id, name, email, username, pos_username, password_hash, pos_password_hash, default_landing)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          actor.branchId, input.name, input.email.trim().toLowerCase(),
+          input.username?.trim().toLowerCase() ?? null,
+          input.username?.trim().toLowerCase() ?? null,
+          passwordHash, passwordHash,
+          input.defaultLanding ?? null,
+        ],
       );
       const userId = (result as { insertId: number }).insertId;
       const [roles] = await connection.execute<Array<RowDataPacket & { id: number }>>(
@@ -99,6 +114,18 @@ export async function createStaff(input: z.infer<typeof createStaffSchema>, acto
         "INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)",
         [userId, roles[0].id],
       );
+      if (input.permissions?.length) {
+        const [modules] = await connection.execute<Array<RowDataPacket & { id: string }>>(
+          `SELECT id FROM modules WHERE id IN (${input.permissions.map(() => "?").join(",")})`,
+          input.permissions,
+        );
+        for (const module of modules) {
+          await connection.execute(
+            "INSERT INTO user_permissions (user_id, module_id, allowed) VALUES (?, ?, TRUE)",
+            [userId, module.id],
+          );
+        }
+      }
       await connection.execute(
         `INSERT INTO employees (user_id, department_id, job_title, phone, hired_at)
          VALUES (?, ?, ?, ?, ?)`,
