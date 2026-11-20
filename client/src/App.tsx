@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowDownLeft, ArrowLeftRight, ArrowUpRight, Barcode, Boxes, CalendarDays, ChevronDown, CircleDollarSign,
+  ArrowDownLeft, ArrowLeftRight, ArrowUpRight, Boxes, CalendarDays, ChevronDown, CircleDollarSign,
   Command, LayoutDashboard, LogOut, PackagePlus, Plus, Search, ShieldCheck,
   ShoppingBasket, ShoppingCart, TrendingUp, X, Users, Truck, Banknote, ReceiptText, RotateCcw, Download,
   Pause, Printer, Trash2,
@@ -1488,19 +1488,33 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       {activeShift.isError && <ErrorBanner message={getErrorMessage(activeShift.error)} onRetry={() => void activeShift.refetch()} />}
       <div className="pos-layout">
         <div className="pos-catalog">
-          <label className="pos-search"><Search size={18} /><input ref={scannerRef} value={search} onKeyDown={scan} onChange={(event) => { setSearch(event.target.value); setSelectedSearchIndex(0); }} placeholder="Scan barcode or search product..." autoFocus /><button type="button" onClick={() => scannerRef.current?.focus()}><Barcode size={16} /> Scan</button></label>
-          {search.trim() && <div className="pos-search-results">
-            {(productsQuery.data ?? []).slice(0, 8).map((product, index) => <button key={product.id} className={index === selectedSearchIndex ? "selected" : ""} onMouseEnter={() => setSelectedSearchIndex(index)} onClick={() => { addProduct(product); setSearch(""); setSelectedSearchIndex(0); window.requestAnimationFrame(() => scannerRef.current?.focus()); }}>
-              <span><strong>{product.name}</strong><small>{product.sku} · {product.category}</small></span>
-              <b>{money(product.sellingPrice)}</b>
-            </button>)}
-            {!productsQuery.isPending && !productsQuery.data?.length && <div>No matching product.</div>}
-          </div>}
           {productsQuery.isError && <ErrorBanner message={getErrorMessage(productsQuery.error)} onRetry={() => void productsQuery.refetch()} />}
           <div className="pos-sale-table-wrap">
             <table className="pos-sale-table">
               <thead><tr><th>No.</th><th>Product code</th><th>Product name</th><th>Qty</th><th>Unit price</th><th>Discount</th><th>Tax</th><th>Total</th><th>Action</th></tr></thead>
               <tbody>
+                <tr className="pos-search-row">
+                  <td className="pos-search-cell" colSpan={9}>
+                    <input
+                      ref={scannerRef}
+                      className="pos-search-input"
+                      aria-label="Scan barcode or search products"
+                      autoComplete="off"
+                      autoFocus
+                      spellCheck={false}
+                      value={search}
+                      onKeyDown={scan}
+                      onChange={(event) => { setSearch(event.target.value); setSelectedSearchIndex(0); }}
+                    />
+                    {search.trim() && <div className="pos-search-results">
+                      {(productsQuery.data ?? []).slice(0, 8).map((product, index) => <button key={product.id} className={index === selectedSearchIndex ? "selected" : ""} onMouseEnter={() => setSelectedSearchIndex(index)} onClick={() => { addProduct(product); setSearch(""); setSelectedSearchIndex(0); window.requestAnimationFrame(() => scannerRef.current?.focus()); }}>
+                        <span><strong>{product.name}</strong><small>{product.sku} · {product.category}</small></span>
+                        <b>{money(product.sellingPrice)}</b>
+                      </button>)}
+                      {!productsQuery.isPending && !productsQuery.data?.length && <div className="pos-search-empty">No matching product.</div>}
+                    </div>}
+                  </td>
+                </tr>
                 {cart.map(({ product, quantity, discount }, index) => <tr key={product.id}>
                   <td>{index + 1}</td><td className="pos-product-code">{product.sku}</td><td className="pos-product-name">{product.name}</td>
                   <td><div className="pos-table-qty"><button onClick={() => adjust(product.id, -1)}>−</button><input value={quantity} onChange={(event) => {
