@@ -18,7 +18,9 @@ type ScannerResult = {
 };
 type ScannerPairingRow = RowDataPacket & {
   id: string;
-  pos_session_id: string;
+  mode: "pos" | "registration";
+  pos_session_id: string | null;
+  auth_session_id: string | null;
   user_id: number;
   branch_id: number;
   pair_token_hash: string | null;
@@ -47,6 +49,17 @@ export function hashScannerToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
+export async function revokeRegistrationScannerPairing(id: string, userId: number): Promise<void> {
+  const pairing = await getActivePairing(id);
+  assertRegistrationSession(pairing, userId);
+  await execute("DELETE FROM mobile_scanner_pairings WHERE id = ?", [id]);
+}
+
+export async function disconnectPhoneScanner(id: string, token: string): Promise<void> {
+  const pairing = await authenticateScanner(id, token);
+  await execute("DELETE FROM mobile_scanner_pairings WHERE id = ?", [pairing.id]);
+}
+
 export function scannerTokenMatches(token: string, expected: string | null): boolean {
   if (!expected) return false;
   const actualBytes = Buffer.from(hashScannerToken(token), "hex");
@@ -62,13 +75,16 @@ function pairingExpired(error: unknown): HttpError | undefined {
 
 async function getActivePairing(id: string): Promise<ScannerPairingRow> {
   const rows = await query<ScannerPairingRow[]>(
-    `SELECT p.id, p.pos_session_id, p.user_id, p.branch_id, p.pair_token_hash,
+    `SELECT p.id, p.mode, p.pos_session_id, p.auth_session_id, p.user_id, p.branch_id, p.pair_token_hash,
             p.scanner_token_hash, p.pair_expires_at, p.expires_at, p.last_scanner_seen_at,
             p.last_pos_seen_at, p.last_barcode, p.last_barcode_at, p.latest_result
      FROM mobile_scanner_pairings p
-     JOIN pos_sessions s ON s.id = p.pos_session_id AND s.expires_at > CURRENT_TIMESTAMP(3)
+     LEFT JOIN pos_sessions s ON s.id = p.pos_session_id
+     LEFT JOIN auth_sessions a ON a.id = p.auth_session_id
      JOIN users u ON u.id = p.user_id AND u.is_active = TRUE
      WHERE p.id = ? AND p.expires_at > CURRENT_TIMESTAMP(3)
+       AND ((p.mode = 'pos' AND s.expires_at > CURRENT_TIMESTAMP(3))
+         OR (p.mode = 'registration' AND a.expires_at > CURRENT_TIMESTAMP(3)))
      LIMIT 1`,
     [id],
   );
@@ -89,8 +105,14 @@ async function authenticateScanner(id: string, token: string): Promise<ScannerPa
 }
 
 function assertPosSession(pairing: ScannerPairingRow, posSessionId: string): void {
-  if (pairing.pos_session_id !== posSessionId) {
+  if (pairing.mode !== "pos" || pairing.pos_session_id !== posSessionId) {
     throw new HttpError(403, "This scanner belongs to a different POS session.");
+  }
+}
+
+function assertRegistrationSession(pairing: ScannerPairingRow, userId: number): void {
+  if (pairing.mode !== "registration" || pairing.user_id !== userId) {
+    throw new HttpError(403, "This scanner belongs to a different product registration session.");
   }
 }
 
@@ -110,10 +132,10 @@ export async function createScannerPairing(user: AuthUser, posSessionId: string)
       );
       await connection.execute(
         `INSERT INTO mobile_scanner_pairings
-         (id, pos_session_id, user_id, branch_id, pair_token_hash, pair_expires_at, expires_at, last_pos_seen_at)
-         VALUES (?, ?, ?, ?, ?, DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 90 SECOND),
+         (id, mode, pos_session_id, user_id, branch_id, pair_token_hash, pair_expires_at, expires_at, last_pos_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?, DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 90 SECOND),
                  DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 2 HOUR), CURRENT_TIMESTAMP(3))`,
-        [id, posSessionId, user.id, user.branchId, hashScannerToken(pairToken)],
+        [id, "pos", posSessionId, user.id, user.branchId, hashScannerToken(pairToken)],
       );
     });
   } catch (error) {
@@ -124,14 +146,42 @@ export async function createScannerPairing(user: AuthUser, posSessionId: string)
   return { id, pairToken, expiresAt: new Date(Date.now() + pairingLifetimeMs).toISOString() };
 }
 
-export async function exchangeScannerPairing(id: string, pairToken: string): Promise<{ scannerToken: string }> {
+export async function createRegistrationScannerPairing(user: AuthUser, authSessionId: string) {
+  const id = randomUUID();
+  const pairToken = randomBytes(32).toString("base64url");
+  await withTransaction(async (connection) => {
+    await connection.execute(
+      "DELETE FROM mobile_scanner_pairings WHERE expires_at <= CURRENT_TIMESTAMP(3) OR auth_session_id = ?",
+      [authSessionId],
+    );
+    await connection.execute(
+      `INSERT INTO mobile_scanner_pairings
+       (id, mode, auth_session_id, user_id, branch_id, pair_token_hash, pair_expires_at, expires_at, last_pos_seen_at)
+       VALUES (?, 'registration', ?, ?, ?, ?, DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 90 SECOND),
+               DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 2 HOUR), CURRENT_TIMESTAMP(3))`,
+      [id, authSessionId, user.id, user.branchId, hashScannerToken(pairToken)],
+    );
+  });
+  return { id, pairToken, expiresAt: new Date(Date.now() + pairingLifetimeMs).toISOString() };
+}
+
+export async function exchangeScannerPairing(
+  id: string,
+  pairToken: string,
+): Promise<{ scannerToken: string; mode: "pos" | "registration" }> {
   const scannerToken = randomBytes(32).toString("base64url");
+  let mode: "pos" | "registration" = "pos";
   await withTransaction(async (connection) => {
     const [rows] = await connection.execute<ScannerPairingRow[]>(
-      `SELECT id, pos_session_id, user_id, branch_id, pair_token_hash, scanner_token_hash,
-              pair_expires_at, expires_at, last_scanner_seen_at, last_pos_seen_at,
-              last_barcode, last_barcode_at, latest_result
-       FROM mobile_scanner_pairings WHERE id = ? FOR UPDATE`,
+      `SELECT p.id, p.mode, p.pos_session_id, p.auth_session_id, p.user_id, p.branch_id,
+              p.pair_token_hash, p.scanner_token_hash, p.pair_expires_at, p.expires_at,
+              p.last_scanner_seen_at, p.last_pos_seen_at, p.last_barcode, p.last_barcode_at, p.latest_result
+       FROM mobile_scanner_pairings p
+       LEFT JOIN pos_sessions s ON s.id = p.pos_session_id
+       LEFT JOIN auth_sessions a ON a.id = p.auth_session_id
+       WHERE p.id = ? AND ((p.mode = 'pos' AND s.expires_at > CURRENT_TIMESTAMP(3))
+         OR (p.mode = 'registration' AND a.expires_at > CURRENT_TIMESTAMP(3)))
+       FOR UPDATE`,
       [id],
     );
     const pairing = rows[0];
@@ -145,6 +195,7 @@ export async function exchangeScannerPairing(id: string, pairToken: string): Pro
     if (pairing.scanner_token_hash) {
       throw new HttpError(409, "This POS session is already paired with a phone.");
     }
+    mode = pairing.mode;
     await connection.execute(
       `UPDATE mobile_scanner_pairings
        SET scanner_token_hash = ?, pair_token_hash = NULL, last_scanner_seen_at = CURRENT_TIMESTAMP(3)
@@ -152,7 +203,7 @@ export async function exchangeScannerPairing(id: string, pairToken: string): Pro
       [hashScannerToken(scannerToken), id],
     );
   });
-  return { scannerToken };
+  return { scannerToken, mode };
 }
 
 export async function reconnectScanner(id: string, token: string) {
@@ -200,13 +251,16 @@ export async function submitScannerBarcode(id: string, token: string, barcode: s
 
 async function selectPairingForUpdate(connection: PoolConnection, id: string): Promise<ScannerPairingRow> {
   const [rows] = await connection.execute<ScannerPairingRow[]>(
-    `SELECT p.id, p.pos_session_id, p.user_id, p.branch_id, p.pair_token_hash,
+    `SELECT p.id, p.mode, p.pos_session_id, p.auth_session_id, p.user_id, p.branch_id, p.pair_token_hash,
             p.scanner_token_hash, p.pair_expires_at, p.expires_at, p.last_scanner_seen_at,
             p.last_pos_seen_at, p.last_barcode, p.last_barcode_at, p.latest_result
      FROM mobile_scanner_pairings p
-     JOIN pos_sessions s ON s.id = p.pos_session_id AND s.expires_at > CURRENT_TIMESTAMP(3)
+     LEFT JOIN pos_sessions s ON s.id = p.pos_session_id
+     LEFT JOIN auth_sessions a ON a.id = p.auth_session_id
      JOIN users u ON u.id = p.user_id AND u.is_active = TRUE
      WHERE p.id = ? AND p.expires_at > CURRENT_TIMESTAMP(3)
+       AND ((p.mode = 'pos' AND s.expires_at > CURRENT_TIMESTAMP(3))
+         OR (p.mode = 'registration' AND a.expires_at > CURRENT_TIMESTAMP(3)))
      FOR UPDATE`,
     [id],
   );
@@ -252,6 +306,76 @@ export async function acknowledgeScannerScan(
   return withTransaction(async (connection) => {
     const pairing = await selectPairingForUpdate(connection, id);
     assertPosSession(pairing, posSessionId);
+    const [rows] = await connection.execute<Array<RowDataPacket & {
+      id: string;
+      barcode: string;
+      processed_at: Date | null;
+    }>>(
+      `SELECT id, barcode, processed_at FROM mobile_scanner_scans
+       WHERE id = ? AND pairing_id = ? FOR UPDATE`,
+      [input.scanId, id],
+    );
+    const scan = rows[0];
+    if (!scan) throw new HttpError(404, "The pending barcode scan no longer exists.");
+    if (scan.processed_at) return { acknowledged: true };
+    const result: ScannerResult = {
+      id: scan.id,
+      barcode: scan.barcode,
+      status: input.status,
+      message: input.message,
+      ...(input.productName ? { productName: input.productName } : {}),
+    };
+    await connection.execute(
+      `UPDATE mobile_scanner_scans SET processed_at = CURRENT_TIMESTAMP(3), result = ?
+       WHERE id = ? AND processed_at IS NULL`,
+      [JSON.stringify(result), input.scanId],
+    );
+    await connection.execute(
+      "UPDATE mobile_scanner_pairings SET latest_result = ? WHERE id = ?",
+      [JSON.stringify(result), id],
+    );
+    return { acknowledged: true };
+  });
+}
+
+export async function pollRegistrationScannerScans(id: string, userId: number) {
+  return withTransaction(async (connection) => {
+    const pairing = await selectPairingForUpdate(connection, id);
+    assertRegistrationSession(pairing, userId);
+    await connection.execute(
+      "UPDATE mobile_scanner_pairings SET last_pos_seen_at = CURRENT_TIMESTAMP(3) WHERE id = ?",
+      [id],
+    );
+    const [scans] = await connection.execute<Array<RowDataPacket & {
+      id: string;
+      barcode: string;
+      created_at: Date;
+    }>>(
+      `SELECT id, barcode, created_at FROM mobile_scanner_scans
+       WHERE pairing_id = ? AND processed_at IS NULL ORDER BY created_at ASC LIMIT 10`,
+      [id],
+    );
+    return {
+      paired: Boolean(pairing.scanner_token_hash),
+      scannerConnected: Boolean(pairing.last_scanner_seen_at
+        && Date.now() - new Date(pairing.last_scanner_seen_at).getTime() < 6_000),
+      scans: scans.map((scan): ScannerScan => ({
+        id: scan.id,
+        barcode: scan.barcode,
+        createdAt: new Date(scan.created_at).getTime(),
+      })),
+    };
+  });
+}
+
+export async function acknowledgeRegistrationScannerScan(
+  id: string,
+  userId: number,
+  input: z.infer<typeof scannerAckSchema>,
+) {
+  return withTransaction(async (connection) => {
+    const pairing = await selectPairingForUpdate(connection, id);
+    assertRegistrationSession(pairing, userId);
     const [rows] = await connection.execute<Array<RowDataPacket & {
       id: string;
       barcode: string;

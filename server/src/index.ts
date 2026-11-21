@@ -38,8 +38,10 @@ import {
   listTransferBranches, receiveInventoryTransfer,
 } from "./operations.js";
 import {
-  acknowledgeScannerScan, createScannerPairing, exchangeScannerPairing, getScannerStatus,
-  lookupPosBarcode, pollScannerScans, reconnectScanner, revokeScannerPairing,
+  acknowledgeRegistrationScannerScan, acknowledgeScannerScan, createRegistrationScannerPairing,
+  createScannerPairing, disconnectPhoneScanner, exchangeScannerPairing, getScannerStatus,
+  lookupPosBarcode, pollRegistrationScannerScans, pollScannerScans, reconnectScanner,
+  revokeRegistrationScannerPairing, revokeScannerPairing,
   scannerAckSchema, scannerPairSchema, scannerScanSchema, submitScannerBarcode,
 } from "./mobile-scanner.js";
 
@@ -150,6 +152,64 @@ app.get("/api/pos/session", authenticate, authenticatePos, (req, res) => {
   res.json({ cashier: { ...req.posUser, username: req.posUser?.posUsername } });
 });
 app.post("/api/pos/logout", authenticate, authenticatePos, (req, res, next) => void posLogout(req, res).catch(next));
+app.post(
+  "/api/products/scanner/pairing",
+  authenticate,
+  requireModule("products"),
+  requireRoles("admin", "manager", "inventory_manager"),
+  (req, res, next) => {
+    try {
+      if (!req.user || !req.sessionId) throw new HttpError(401, "Product registration session required.");
+      void createRegistrationScannerPairing(req.user, req.sessionId).then(
+        (pairing) => res.status(201).json(pairing),
+        next,
+      );
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+app.get(
+  "/api/products/scanner/pairing/:id/poll",
+  authenticate,
+  requireModule("products"),
+  requireRoles("admin", "manager", "inventory_manager"),
+  (req, res, next) => {
+    const id = scannerPairingId(req.params.id);
+    if (!id) { res.status(400).json({ error: "Invalid scanner pairing ID." }); return; }
+    if (!req.user) { res.status(401).json({ error: "Product registration session required." }); return; }
+    void pollRegistrationScannerScans(id, req.user.id).then((result) => res.json(result), next);
+  },
+);
+app.post(
+  "/api/products/scanner/pairing/:id/ack",
+  authenticate,
+  requireModule("products"),
+  requireRoles("admin", "manager", "inventory_manager"),
+  (req, res, next) => {
+    const id = scannerPairingId(req.params.id);
+    if (!id) { res.status(400).json({ error: "Invalid scanner pairing ID." }); return; }
+    if (!req.user) { res.status(401).json({ error: "Product registration session required." }); return; }
+    try {
+      const input = scannerAckSchema.parse(req.body);
+      void acknowledgeRegistrationScannerScan(id, req.user.id, input).then((result) => res.json(result), next);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+app.delete(
+  "/api/products/scanner/pairing/:id",
+  authenticate,
+  requireModule("products"),
+  requireRoles("admin", "manager", "inventory_manager"),
+  (req, res, next) => {
+    const id = scannerPairingId(req.params.id);
+    if (!id) { res.status(400).json({ error: "Invalid scanner pairing ID." }); return; }
+    if (!req.user) { res.status(401).json({ error: "Product registration session required." }); return; }
+    void revokeRegistrationScannerPairing(id, req.user.id).then(() => res.status(204).end(), next);
+  },
+);
 app.post("/api/pos/scanner/pairing", authenticate, authenticatePos, requireModule("pos"), (req, res, next) => {
   try {
     if (!req.posSessionId || !req.posUser) throw new HttpError(401, "POS authentication required.");
@@ -176,6 +236,15 @@ app.post("/api/pos/scanner/:id/reconnect", (req, res, next) => {
   if (!id) { res.status(400).json({ error: "Invalid scanner pairing ID." }); return; }
   try {
     void reconnectScanner(id, scannerBearerToken(req)).then((result) => res.json(result), next);
+  } catch (error) {
+    next(error);
+  }
+});
+app.post("/api/pos/scanner/:id/disconnect", (req, res, next) => {
+  const id = scannerPairingId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid scanner pairing ID." }); return; }
+  try {
+    void disconnectPhoneScanner(id, scannerBearerToken(req)).then(() => res.status(204).end(), next);
   } catch (error) {
     next(error);
   }

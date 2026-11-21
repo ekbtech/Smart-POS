@@ -805,6 +805,9 @@ a { color: inherit; text-decoration: none; }
 .products-page .eyebrow { color: #647d9a; }
 .products-page .page-heading h1 { color: #102b4c; }
 .products-page .page-heading p { color: #687b91; }
+.products-heading-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
+.products-heading-actions .product-phone-scanner-button { min-height: 38px; white-space: nowrap; }
+.products-heading-actions .product-phone-scanner-button:disabled { opacity: .6; cursor: wait; }
 .products-page .product-total { border-color: #d8e4f0; background: #f4f8fc; color: #416487; }
 .products-page .product-total svg { color: #397bb2; }
 .products-page .products-toolbar { padding-bottom: 17px; }
@@ -1006,6 +1009,7 @@ button.inventory-metric:hover, button.inventory-metric.selected { border-color: 
 .phone-pairing-actions .confirm { background: #17633a; color: #fff; }
 .phone-pairing-actions .cancel { background: #edf3ee; color: #31583d; }
 .phone-pairing-actions button:disabled { opacity: .55; cursor: wait; }
+.phone-pairing-notice { margin: 12px 0; padding: 11px 12px; border: 1px solid #e7d8b6; border-radius: 6px; background: #fffaf0; color: #795b27; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
 .phone-pairing-security { display: block; margin-top: 15px; color: #87938a; font-size: 9px; line-height: 1.5; }
 
 .mobile-scanner-page { min-height: 100vh; min-height: 100dvh; padding: 16px; background: #edf2ee; color: #29382e; }

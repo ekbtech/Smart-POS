@@ -418,6 +418,9 @@ function ProductsPage({ user }: { user: User }) {
   const [barcodeCameraScanning, setBarcodeCameraScanning] = useState(false);
   const [barcodeCameraError, setBarcodeCameraError] = useState("");
   const [manualLookupBarcode, setManualLookupBarcode] = useState("");
+  const [registrationScannerOpen, setRegistrationScannerOpen] = useState(false);
+  const [registrationPairing, setRegistrationPairing] = useState<{ id: string; qr: string; expiresAt: string } | null>(null);
+  const [registrationScannerError, setRegistrationScannerError] = useState("");
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<{ imported: number; failures: string[]; failureCount: number } | null>(null);
   const productVideoRef = useRef<HTMLVideoElement>(null);
@@ -425,6 +428,8 @@ function ProductsPage({ user }: { user: User }) {
   const productBarcodeHandledRef = useRef(false);
   const barcodeLookupRequestRef = useRef(false);
   const lastLookupBarcodeRef = useRef("");
+  const processedRegistrationScansRef = useRef(new Set<string>());
+  const registrationScanProcessingRef = useRef(false);
   const autoLookupValuesRef = useRef<Partial<Record<"name" | "brand" | "category" | "packageSize" | "description" | "unit", string>>>({});
   const canManage = user.roles.some((role) => ["admin", "manager", "inventory_manager"].includes(role));
   const schema = z.object({
@@ -515,6 +520,38 @@ function ProductsPage({ user }: { user: User }) {
     },
     onSettled: () => { barcodeLookupRequestRef.current = false; },
   });
+  const createRegistrationPairing = useMutation({
+    mutationFn: async () => {
+      if (window.location.protocol !== "https:" || ["localhost", "127.0.0.1"].includes(window.location.hostname)) {
+        throw new Error("Open Smart POS through a trusted, phone-reachable HTTPS address before pairing.");
+      }
+      const { data } = await api.post<{ id: string; pairToken: string; expiresAt: string }>("/products/scanner/pairing");
+      const scannerOrigin = import.meta.env.VITE_PUBLIC_APP_URL?.trim() || window.location.origin;
+      const url = new URL("/mobile-scanner", scannerOrigin);
+      if (url.protocol !== "https:") throw new Error("The mobile scanner page must be hosted at an HTTPS address.");
+      url.hash = new URLSearchParams({ pair: `${data.id}.${data.pairToken}` }).toString();
+      const { default: QRCode } = await import("qrcode");
+      const qr = await QRCode.toDataURL(url.toString(), { width: 260, margin: 1, errorCorrectionLevel: "M" });
+      return { id: data.id, qr, expiresAt: data.expiresAt };
+    },
+    onSuccess: (pairing) => {
+      processedRegistrationScansRef.current.clear();
+      setRegistrationPairing(pairing);
+      setRegistrationScannerError("");
+    },
+    onError: (error) => setRegistrationScannerError(getErrorMessage(error)),
+  });
+  const registrationScannerQuery = useQuery({
+    queryKey: ["registration-phone-scanner", registrationPairing?.id],
+    queryFn: async () => (await api.get<{
+      paired: boolean;
+      scannerConnected: boolean;
+      scans: Array<{ id: string; barcode: string; createdAt: number }>;
+    }>(`/products/scanner/pairing/${registrationPairing!.id}/poll`)).data,
+    enabled: Boolean(registrationPairing),
+    refetchInterval: 1200,
+    retry: false,
+  });
   const lookupBarcode = (barcode: string) => {
     const value = barcode.trim();
     if (barcodeLookupRequestRef.current) return;
@@ -538,6 +575,81 @@ function ProductsPage({ user }: { user: User }) {
     barcodeLookupRequestRef.current = true;
     barcodeLookup.mutate(value);
   };
+  const disconnectRegistrationScanner = useMutation({
+    mutationFn: () => api.delete(`/products/scanner/pairing/${registrationPairing!.id}`),
+    onSuccess: () => {
+      processedRegistrationScansRef.current.clear();
+      registrationScanProcessingRef.current = false;
+      setRegistrationPairing(null);
+      setRegistrationScannerError("");
+      void query.removeQueries({ queryKey: ["registration-phone-scanner"] });
+    },
+    onError: (error) => setRegistrationScannerError(getErrorMessage(error)),
+  });
+  useEffect(() => {
+    const scan = (registrationScannerQuery.data?.scans ?? [])
+      .find((item) => !processedRegistrationScansRef.current.has(item.id));
+    if (!registrationPairing || !registrationScannerQuery.data?.paired || !scan
+      || registrationScanProcessingRef.current) return;
+    processedRegistrationScansRef.current.add(scan.id);
+    registrationScanProcessingRef.current = true;
+    void (async () => {
+      let acknowledgement: {
+        status: "added" | "unknown" | "rejected" | "error";
+        message: string;
+        productName?: string;
+      };
+      try {
+        if (lastLookupBarcodeRef.current && lastLookupBarcodeRef.current !== scan.barcode) {
+          for (const [field, previousValue] of Object.entries(autoLookupValuesRef.current) as Array<[keyof typeof autoLookupValuesRef.current, string]>) {
+            if (form.getValues(field) === previousValue) {
+              form.setValue(field, field === "unit" ? "piece" : "", { shouldDirty: true });
+            }
+          }
+          autoLookupValuesRef.current = {};
+          lastLookupBarcodeRef.current = "";
+          setLookupImageUrl(null);
+        }
+        form.setValue("barcode", scan.barcode, { shouldDirty: true });
+        const result = await barcodeLookup.mutateAsync(scan.barcode);
+        if (result.duplicate) {
+          acknowledgement = {
+            status: "rejected",
+            message: `Barcode is already registered to ${result.duplicate.name}.`,
+            productName: result.duplicate.name,
+          };
+        } else if (result.found) {
+          acknowledgement = {
+            status: "added",
+            message: "Product details were sent to the Add Product form. Review them before saving.",
+            ...(result.name ? { productName: result.name } : {}),
+          };
+        } else {
+          acknowledgement = {
+            status: "unknown",
+            message: result.externalLookupSkipped
+              ? "Barcode kept. Enter product details manually."
+              : "No external product match. Barcode kept; enter product details manually.",
+          };
+        }
+      } catch (error) {
+        acknowledgement = { status: "error", message: getErrorMessage(error).slice(0, 200) };
+      }
+      try {
+        await api.post(`/products/scanner/pairing/${registrationPairing.id}/ack`, {
+          scanId: scan.id,
+          ...acknowledgement,
+        });
+        setRegistrationScannerError("");
+      } catch (error) {
+        processedRegistrationScansRef.current.delete(scan.id);
+        setRegistrationScannerError(`Could not confirm the phone scan: ${getErrorMessage(error)}`);
+      } finally {
+        registrationScanProcessingRef.current = false;
+        void query.invalidateQueries({ queryKey: ["registration-phone-scanner", registrationPairing.id] });
+      }
+    })();
+  }, [registrationScannerQuery.data, registrationPairing, barcodeLookup, form, query]);
   const stopProductCamera = () => {
     productCameraControlsRef.current?.stop();
     productCameraControlsRef.current = null;
@@ -799,7 +911,18 @@ function ProductsPage({ user }: { user: User }) {
     <section className="page-content products-page">
       <div className="page-heading">
         <div><div className="eyebrow"><span className="eyebrow-dot" /> CATALOGUE</div><h1>Product catalogue<span className="heading-period">.</span></h1><p>Manage product details, pricing, images and branch stock levels.</p></div>
-        <div className="product-total"><PackagePlus size={17} /> {pagination?.total ?? "—"} PRODUCTS</div>
+        <div className="products-heading-actions">
+          {canManage && !editingProduct && <button className="button button-dark product-phone-scanner-button" type="button" disabled={createRegistrationPairing.isPending} onClick={() => {
+            setRegistrationScannerOpen(true);
+            setRegistrationScannerError("");
+            if (!registrationPairing
+              || Date.now() >= Date.parse(registrationPairing.expiresAt)
+              || registrationScannerQuery.data?.paired) {
+              createRegistrationPairing.mutate();
+            }
+          }}><Smartphone size={16} /> {createRegistrationPairing.isPending ? "Creating QR…" : "Connect Phone Scanner"}</button>}
+          <div className="product-total"><PackagePlus size={17} /> {pagination?.total ?? "—"} PRODUCTS</div>
+        </div>
       </div>
       {success && <div role="status" className="success-banner">{success}<button onClick={() => setSuccess("")} aria-label="Dismiss"><X size={15} /></button></div>}
       {formError && <ErrorBanner message={formError} onRetry={() => setFormError("")} />}
@@ -988,6 +1111,36 @@ function ProductsPage({ user }: { user: User }) {
               <button className="small-action" type="submit" disabled={barcodeLookup.isPending}>{barcodeLookup.isPending ? "Looking up…" : "Use & look up"}</button></div>
           </form>
           <small>Supports EAN-13, EAN-8, UPC-A, UPC-E and Code 128. Internet product lookup is available for EAN/UPC formats only. Camera access requires HTTPS.</small>
+        </section>
+      </div>}
+      {registrationScannerOpen && <div className="pos-confirm-screen phone-pairing-screen" role="dialog" aria-modal="true" aria-labelledby="registration-scanner-title">
+        <section className="phone-pairing-card">
+          <button className="phone-pairing-close" aria-label="Close phone scanner pairing" onClick={() => setRegistrationScannerOpen(false)}><X size={18} /></button>
+          <span className="pos-confirm-eyebrow">PRODUCT REGISTRATION</span>
+          <h2 id="registration-scanner-title">Connect Phone Scanner</h2>
+          <p>Scan this temporary QR code with Android. Scanned barcodes are checked against your catalogue, then new EAN/UPC codes are looked up online and filled into this form.</p>
+          {(window.location.protocol !== "https:" || ["localhost", "127.0.0.1"].includes(window.location.hostname)) && <div className="phone-pairing-notice" role="note">
+            A pairing QR code cannot be created from {window.location.origin}. Open Smart POS at a trusted HTTPS address reachable by both this computer and your phone, then try again.
+          </div>}
+          {registrationScannerError && <div className="pos-login-error" role="alert">{registrationScannerError}</div>}
+          {registrationPairing && registrationScannerQuery.data?.paired ? <div className={`phone-pairing-status ${registrationScannerQuery.data.scannerConnected ? "connected" : ""}`}>
+            <Smartphone size={19} /><div><strong>{registrationScannerQuery.data.scannerConnected ? "Phone scanner connected" : "Phone paired"}</strong><span>{registrationScannerQuery.data.scannerConnected ? "Ready to scan a new product barcode." : "Waiting for the phone scanner to reconnect."}</span></div>
+          </div> : registrationPairing && Date.now() < Date.parse(registrationPairing.expiresAt)
+            ? <img className="phone-pairing-qr" src={registrationPairing.qr} alt="One-time product registration pairing QR code" />
+            : <div className="phone-pairing-placeholder"><QrCode size={28} /><span>{createRegistrationPairing.isPending ? "Creating secure pairing code…" : "Create a short-lived pairing QR code."}</span></div>}
+          {registrationScannerQuery.isError && <div className="pos-login-error" role="alert">{getErrorMessage(registrationScannerQuery.error)}</div>}
+          <div className="phone-pairing-actions">
+            {registrationScannerQuery.data?.paired && <button className="cancel" disabled={disconnectRegistrationScanner.isPending} onClick={() => disconnectRegistrationScanner.mutate()}>
+              {disconnectRegistrationScanner.isPending ? "Disconnecting…" : "Disconnect phone"}
+            </button>}
+            {!registrationPairing || Date.now() >= Date.parse(registrationPairing.expiresAt) || registrationScannerQuery.data?.paired
+              ? <button className="confirm" disabled={createRegistrationPairing.isPending} onClick={() => createRegistrationPairing.mutate()}>
+                {createRegistrationPairing.isPending ? "Creating…" : registrationScannerQuery.data?.paired ? "Pair another phone" : "Create pairing QR"}
+              </button>
+              : <span>Pairing code expires at {new Date(registrationPairing.expiresAt).toLocaleTimeString("en-KE")}.</span>}
+            <button className="cancel" onClick={() => setRegistrationScannerOpen(false)}>Close</button>
+          </div>
+          <small className="phone-pairing-security">A trusted HTTPS app and backend are required. The QR code is single-use and expires after 90 seconds.</small>
         </section>
       </div>}
     </section>
@@ -2063,6 +2216,7 @@ function MetricCard({ label, value, caption, icon, tone, loading }: { label: str
 function MobileScannerPage() {
   const [pairingId, setPairingId] = useState("");
   const [scannerToken, setScannerToken] = useState("");
+  const [scannerMode, setScannerMode] = useState<"pos" | "registration">("pos");
   const [pairingMessage, setPairingMessage] = useState("Scan the pairing QR code displayed on the POS computer.");
   const [cameraError, setCameraError] = useState("");
   const [manualBarcode, setManualBarcode] = useState("");
@@ -2089,23 +2243,31 @@ function MobileScannerPage() {
       const id = pair.slice(0, separator);
       const pairToken = pair.slice(separator + 1);
       window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
-      void api.post<{ scannerToken: string }>(`/pos/scanner/pair/${id}`, { token: pairToken })
+      void api.post<{ scannerToken: string; mode: "pos" | "registration" }>(`/pos/scanner/pair/${id}`, { token: pairToken })
         .then(({ data }) => {
           if (!active) return;
           window.sessionStorage.setItem(`smart-pos-scanner:${id}`, data.scannerToken);
           window.sessionStorage.setItem("smart-pos-scanner-id", id);
+          window.sessionStorage.setItem("smart-pos-scanner-mode", data.mode);
           setPairingId(id);
           setScannerToken(data.scannerToken);
-          setPairingMessage("Phone paired. Connect to the POS computer to scan products.");
+          setScannerMode(data.mode);
+          setPairingMessage(data.mode === "registration"
+            ? "Phone paired. Connect to the Products form to identify a new product."
+            : "Phone paired. Connect to the POS computer to scan products.");
         })
         .catch((error: unknown) => setPairingMessage(getErrorMessage(error)));
     } else {
       const id = window.sessionStorage.getItem("smart-pos-scanner-id") ?? "";
       const token = id ? window.sessionStorage.getItem(`smart-pos-scanner:${id}`) ?? "" : "";
+      const savedMode = window.sessionStorage.getItem("smart-pos-scanner-mode");
       if (id && token) {
         setPairingId(id);
         setScannerToken(token);
-        setPairingMessage("Reconnecting to your paired POS session…");
+        setScannerMode(savedMode === "registration" ? "registration" : "pos");
+        setPairingMessage(savedMode === "registration"
+          ? "Reconnecting to your product registration session…"
+          : "Reconnecting to your paired POS session…");
       }
     }
     return () => { active = false; };
@@ -2194,6 +2356,29 @@ function MobileScannerPage() {
     }
   };
 
+  const disconnect = async () => {
+    if (!pairingId || !scannerToken) return;
+    try {
+      await api.post(`/pos/scanner/${pairingId}/disconnect`, {}, {
+        headers: { Authorization: `Bearer ${scannerToken}` },
+      });
+    } catch (error) {
+      setCameraError(getErrorMessage(error));
+      return;
+    }
+    stopCamera();
+    window.sessionStorage.removeItem(`smart-pos-scanner:${pairingId}`);
+    window.sessionStorage.removeItem("smart-pos-scanner-id");
+    window.sessionStorage.removeItem("smart-pos-scanner-mode");
+    awaitingResultRef.current = false;
+    pendingResultIdRef.current = "";
+    setPairingId("");
+    setScannerToken("");
+    setDesktopConnected(false);
+    setResult(null);
+    setPairingMessage("Scanner disconnected. Scan a new pairing QR code to connect again.");
+  };
+
   const stopCamera = () => {
     controlsRef.current?.stop();
     controlsRef.current = null;
@@ -2250,11 +2435,11 @@ function MobileScannerPage() {
       <header className="mobile-scanner-header">
         <span className="brand-mark">s</span>
         <div><strong>Smart POS</strong><small>Phone barcode scanner</small></div>
-        <span className={`scanner-connection ${desktopConnected ? "connected" : ""}`}><i />{desktopConnected ? "POS connected" : "POS offline"}</span>
+        <span className={`scanner-connection ${desktopConnected ? "connected" : ""}`}><i />{desktopConnected ? "Laptop connected" : "Laptop offline"}</span>
       </header>
       <section className="mobile-scanner-card">
-        <div className="eyebrow"><span className="eyebrow-dot" /> WIRELESS CHECKOUT</div>
-        <h1>Scan a product</h1>
+        <div className="eyebrow"><span className="eyebrow-dot" /> {scannerMode === "registration" ? "PRODUCT REGISTRATION" : "WIRELESS CHECKOUT"}</div>
+        <h1>{scannerMode === "registration" ? "Identify a product" : "Scan a product"}</h1>
         <p>{pairingMessage}</p>
         {!window.isSecureContext && <div className="scanner-notice">Open this page through trusted HTTPS to allow Android camera access.</div>}
         {!pairingId || !scannerToken ? (
@@ -2270,6 +2455,7 @@ function MobileScannerPage() {
               ? <button className="scanner-primary" onClick={() => void startCamera()}><Camera size={17} /> Start scanning</button>
               : <button className="scanner-stop" onClick={stopCamera}><CameraOff size={17} /> Stop scanning</button>}
             <button className="scanner-reconnect" onClick={() => void reconnect()}><RefreshCw size={16} /> Reconnect</button>
+            <button className="scanner-reconnect" onClick={() => void disconnect()}><X size={16} /> Disconnect</button>
           </div>
           <form className="scanner-manual-form" onSubmit={(event) => {
             event.preventDefault();

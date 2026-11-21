@@ -25,6 +25,12 @@ Revokes the server-side session and clears the cookie.
 - `POST /pos/login` — database-backed POS cashier login. Requires a four-character minimum username and password. Five incorrect attempts temporarily lock the account for 15 minutes.
 - `GET /pos/session` — verifies the dedicated two-hour POS session. Requires the main application session and authorized cashier role.
 - `POST /pos/logout` — revokes the dedicated POS session and records a POS logout audit event.
+- `POST /pos/scanner/pairing` — create a one-time phone scanner QR pairing for the active POS session.
+- `POST /products/scanner/pairing` — administrator, manager, or inventory manager with Products access; create a one-time phone pairing scoped to the current authenticated product-registration session.
+- `POST /pos/scanner/pair/:id` — exchange a one-time QR token for a scanner bearer token; response includes the pairing mode (`pos` or `registration`). Pair tokens expire after 90 seconds and can be exchanged only once.
+- `GET /products/scanner/pairing/:id/poll`, `POST /products/scanner/pairing/:id/ack`, `DELETE /products/scanner/pairing/:id` — poll registration-mode phone barcode events, return scan results to the phone, and revoke pairing. All require the owning authenticated user and Products access.
+- `POST /pos/scanner/:id/scans`, `GET /pos/scanner/:id/status`, `POST /pos/scanner/:id/reconnect`, `POST /pos/scanner/:id/disconnect` — scanner-bearer-authenticated phone operations; barcode scans are queued to the owning laptop session, and disconnect revokes the scanner token.
+- `GET /pos/scanner/pairing/:id/poll`, `POST /pos/scanner/pairing/:id/ack`, `DELETE /pos/scanner/pairing/:id` — active POS-session operations to receive/acknowledge barcode scans and revoke pairing.
 
 POS sales, held-sale listing, hold and retrieval require both the main authenticated session and an active dedicated POS session. A POS session is independent of the main application login and must be repeated after logout or expiry.
 
@@ -72,7 +78,7 @@ The Products screen supports CSV import and export. CSV imports create products 
 }
 ```
 
-Apply migrations `016_product_lookup_fields.sql` and `017_product_description.sql` before deploying these fields. CSV import/export also supports the optional `description` field.
+Apply migrations `016_product_lookup_fields.sql`, `017_product_description.sql`, and `018_mobile_registration_scanner.sql` before deploying these fields and registration scanner pairing. CSV import/export also supports the optional `description` field.
 
 ## Checkout
 
