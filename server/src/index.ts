@@ -516,7 +516,7 @@ app.get("/api/staff/:id/activity", authenticate, requireRoles("admin"), async (r
   }
 });
 
-app.get("/api/products", authenticate, requireModule("products"), async (req, res, next) => {
+app.get("/api/products", authenticate, requireAnyModule("products", "pos"), async (req, res, next) => {
   try {
     const search = typeof req.query.search === "string" ? req.query.search.trim().slice(0, 100) : "";
     const category = typeof req.query.category === "string" ? req.query.category.trim().slice(0, 100) : "";
@@ -582,7 +582,7 @@ app.get("/api/products", authenticate, requireModule("products"), async (req, re
         category: product.category_name,
         unit: product.unit,
         sellingPrice: product.selling_price,
-        purchasePrice: product.purchase_price,
+        purchasePrice: req.user!.modules?.includes("products") ? product.purchase_price : null,
         taxRate: product.tax_rate,
         reorderLevel: product.reorder_level,
         stock: String(product.stock),
