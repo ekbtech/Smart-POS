@@ -28,6 +28,8 @@ Revokes the server-side session and clears the cookie.
 
 POS sales, held-sale listing, hold and retrieval require both the main authenticated session and an active dedicated POS session. A POS session is independent of the main application login and must be repeated after logout or expiry.
 
+- `GET /pos/scanner/product?barcode=4006381333931` — authenticated active POS session; performs an exact barcode lookup against active products and available inventory in the cashier's branch only. It never calls an external catalogue. The POS keyboard-wedge scanner uses this local path for barcode input; ordinary typed product searches remain catalogue searches.
+
 ## Access permissions
 
 - `GET /access/modules` — administrator-only module catalog.
@@ -42,19 +44,24 @@ The sidebar and frontend routes consume effective modules. Backend APIs independ
 - `GET /reports/summary?from=YYYY-MM-DD&to=YYYY-MM-DD` — branch-scoped sales, refunds, cashier/product/category/payment breakdowns, expenses, purchase receipts, inventory valuation, and low stock. Admin, manager, or accountant only. Dates are inclusive; omitted dates default to the latest 30 calendar days, and ranges are limited to 366 days. The report screen supports CSV export.
 - `GET /products?search=milk&page=1&pageSize=20&category=Dairy&stockStatus=low_stock&sort=stock&direction=asc` — active products with branch-available stock, server-side search/filter/sort, and pagination. `pageSize` is 1–100; `stockStatus` is `in_stock`, `low_stock`, or `out_of_stock`. Search terms match partial product names, SKUs, and barcodes.
 - `GET /products/categories` — categories used by active products.
-- `POST /products` — admin, manager, or inventory manager only. Registers a product, creates its category if needed, sets the branch's opening stock, and writes an opening stock movement and audit event.
+- `POST /products/lookup/barcode` — admin, manager, or inventory manager only; rate-limited to 20 requests/minute. Accepts a printable barcode up to 64 characters. The API checks the local product table first. If the barcode already belongs to an active or archived product, it returns `{ "found": false, "duplicate": { "id": 8, "sku": "TEA-8", "name": "Existing tea", "isActive": true } }` and does not contact the external service. Unregistered EAN-13, EAN-8, UPC-A, and UPC-E values are queried against Open Food Facts; other barcode formats are retained for manual registration without an external request. Returns `{ "found": false }` when no catalogue match exists, or only the available `name`, `description`, `brand`, `category`, `packageSize`, and allowlisted `imageUrl` fields. External lookup failures return HTTP 502 and do not block manual product entry.
+- `POST /products` — admin, manager, or inventory manager only. Registers a product (including optional `brand`, `packageSize`, and `description`), creates its category if needed, sets the branch's opening stock, and writes an opening stock movement and audit event. Existing unique SKU and barcode indexes reject duplicate registrations.
 - `PATCH /products/:id` — update catalogue fields; same roles as creation. Set `{ "isActive": false }` to archive a product; archiving is refused while any branch has on-hand/reserved inventory or an open purchase order containing the product.
 - `GET /products/:id/image` — authenticated product/inventory module access; returns the private product image.
 - `PUT /products/:id/image` — admin, manager, or inventory manager only. Send a raw JPEG, PNG, or WebP body (`Content-Type: image/jpeg`, `image/png`, or `image/webp`), maximum 5 MB. Images are stored in MySQL by migration 011.
+- `POST /products/:id/image/import` — admin, manager, or inventory manager only. Accepts an `imageUrl` returned by product lookup, downloads only from the HTTPS Open Food Facts image host, validates JPEG/PNG/WebP bytes, and stores the image using the existing image storage.
 - `DELETE /products/:id/image` — remove the stored image; same roles as product updates.
 
-The Products screen supports CSV import and export. CSV imports create products one at a time, preserve per-row failures in the result, and accept up to 1,000 rows per file. Required columns are `sku`, `name`, `category`, `unit`, and `sellingPrice`; optional columns include `barcode`, `purchasePrice`, `taxRate`, `reorderLevel`, and `openingStock`.
+The Products screen supports CSV import and export. CSV imports create products one at a time, preserve per-row failures in the result, and accept up to 1,000 rows per file. Required columns are `sku`, `name`, `category`, `unit`, and `sellingPrice`; optional columns include `barcode`, `brand`, `packageSize`, `description`, `purchasePrice`, `taxRate`, `reorderLevel`, and `openingStock`.
 
 ```json
 {
   "sku": "DAIR-012",
   "barcode": "600100100012",
   "name": "Long-life milk 1L",
+  "brand": "Example Brand",
+  "packageSize": "1 L",
+  "description": "Long-life milk drink",
   "category": "Dairy",
   "unit": "piece",
   "sellingPrice": "165.00",
@@ -64,6 +71,8 @@ The Products screen supports CSV import and export. CSV imports create products 
   "openingStock": "20"
 }
 ```
+
+Apply migrations `016_product_lookup_fields.sql` and `017_product_description.sql` before deploying these fields. CSV import/export also supports the optional `description` field.
 
 ## Checkout
 

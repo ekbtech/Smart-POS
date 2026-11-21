@@ -7,6 +7,9 @@ describe("product registration validation", () => {
       sku: "PROD-007",
       barcode: "",
       name: "Ripe bananas",
+      brand: "Example Farm",
+      packageSize: "1 kg",
+      description: "Locally grown ripe bananas.",
       category: "Fresh produce",
       unit: "kg",
       sellingPrice: "180.00",
@@ -15,7 +18,12 @@ describe("product registration validation", () => {
       openingStock: "12.500",
     });
     expect(result.success).toBe(true);
-    if (result.success) expect(result.data.barcode).toBeNull();
+    if (result.success) {
+      expect(result.data.barcode).toBeNull();
+      expect(result.data.brand).toBe("Example Farm");
+      expect(result.data.packageSize).toBe("1 kg");
+      expect(result.data.description).toBe("Locally grown ripe bananas.");
+    }
   });
 
   it("rejects unsafe SKUs and tax rates over 100 percent", () => {

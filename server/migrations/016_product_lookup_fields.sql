@@ -1,0 +1,3 @@
+ALTER TABLE products
+  ADD COLUMN brand VARCHAR(120) NULL AFTER name,
+  ADD COLUMN package_size VARCHAR(80) NULL AFTER brand;

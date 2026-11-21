@@ -22,6 +22,9 @@ import {
   setStaffStatus, staffStatusSchema, updateRolePermissions, updateStaff, updateStaffSchema,
 } from "./staff.js";
 import { productSchema, registerProduct, updateProduct, updateProductSchema } from "./products.js";
+import {
+  fetchOpenFoodFactsImage, lookupRegistrationBarcode, productBarcodeLookupSchema, productImageImportSchema,
+} from "./product-lookup.js";
 import { getBranchReport, parseReportRange } from "./reports.js";
 import {
   addCashMovement, adjustmentSchema, approvePurchaseOrder, cashMovementSchema, closeShift, closeShiftSchema,
@@ -83,6 +86,7 @@ app.use((req, res, next) => {
 });
 
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: "draft-8", legacyHeaders: false });
+const productLookupLimiter = rateLimit({ windowMs: 60 * 1000, limit: 20, standardHeaders: "draft-8", legacyHeaders: false });
 
 function positiveId(value: string | string[] | undefined): number | undefined {
   if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) return undefined;
@@ -458,7 +462,7 @@ app.get("/api/products", authenticate, requireModule("products"), async (req, re
       res.status(400).json({ error: "Invalid product list filters." });
       return;
     }
-    const baseSql = `SELECT p.id, p.sku, p.name, COALESCE(c.name, 'Uncategorised') AS category_name,
+    const baseSql = `SELECT p.id, p.sku, p.name, p.brand, p.package_size, p.description, COALESCE(c.name, 'Uncategorised') AS category_name,
               p.unit, p.selling_price, p.purchase_price, p.tax_rate, p.reorder_level,
               GREATEST(COALESCE(i.on_hand - i.reserved, 0) - COALESCE(expired.quantity, 0), 0) AS stock,
               p.barcode, (p.image_mime_type IS NOT NULL) AS has_image
@@ -488,7 +492,8 @@ app.get("/api/products", authenticate, requireModule("products"), async (req, re
     const orderBy = sort === "price" ? "catalogue.selling_price"
       : sort === "stock" ? "catalogue.stock" : "catalogue.name";
     const products = await query<Array<{
-      id: number; sku: string; name: string; category_name: string | null; unit: string; tax_rate: string; reorder_level: string;
+      id: number; sku: string; name: string; brand: string | null; package_size: string | null; description: string | null;
+      category_name: string | null; unit: string; tax_rate: string; reorder_level: string;
       selling_price: string; purchase_price: string | null; stock: string; barcode: string | null; has_image: number;
     } & import("mysql2").RowDataPacket>>(
       `SELECT * FROM (${baseSql}) catalogue
@@ -502,6 +507,9 @@ app.get("/api/products", authenticate, requireModule("products"), async (req, re
         id: product.id,
         sku: product.sku,
         name: product.name,
+        brand: product.brand,
+        packageSize: product.package_size,
+        description: product.description,
         category: product.category_name,
         unit: product.unit,
         sellingPrice: product.selling_price,
@@ -536,6 +544,37 @@ app.get("/api/products/categories", authenticate, requireModule("products"), asy
     next(error);
   }
 });
+
+app.post(
+  "/api/products/lookup/barcode",
+  authenticate,
+  requireModule("products"),
+  requireRoles("admin", "manager", "inventory_manager"),
+  productLookupLimiter,
+  async (req, res, next) => {
+    try {
+      const { barcode } = productBarcodeLookupSchema.parse(req.body);
+      const result = await lookupRegistrationBarcode(barcode, async (value) => {
+        const products = await query<Array<{
+          id: number; sku: string; name: string; is_active: number;
+        } & import("mysql2").RowDataPacket>>(
+          "SELECT id, sku, name, is_active FROM products WHERE barcode = ? LIMIT 1",
+          [value],
+        );
+        const product = products[0];
+        return product ? {
+          id: product.id,
+          sku: product.sku,
+          name: product.name,
+          isActive: Boolean(product.is_active),
+        } : null;
+      });
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 app.get("/api/products/:id/image", authenticate, requireAnyModule("products", "inventory"), async (req, res, next) => {
   const id = positiveId(req.params.id);
@@ -617,6 +656,31 @@ app.put(
     }
   },
 );
+
+app.post("/api/products/:id/image/import", authenticate, requireAnyModule("products", "inventory"), requireRoles("admin", "manager", "inventory_manager"), async (req, res, next) => {
+  const id = positiveId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid product ID." }); return; }
+  try {
+    const { imageUrl } = productImageImportSchema.parse(req.body);
+    const [products] = await pool.execute<Array<{ id: number } & import("mysql2").RowDataPacket>>(
+      "SELECT id FROM products WHERE id = ? LIMIT 1",
+      [id],
+    );
+    if (!products[0]) { res.status(404).json({ error: "Product not found." }); return; }
+    const image = await fetchOpenFoodFactsImage(imageUrl);
+    await pool.execute(
+      "UPDATE products SET image_data = ?, image_mime_type = ? WHERE id = ?",
+      [image.data, image.mimeType, id],
+    );
+    await pool.execute(
+      "INSERT INTO audit_logs (user_id, action, entity_type, entity_id) VALUES (?, 'product.image_updated', 'product', ?)",
+      [req.user!.id, String(id)],
+    );
+    res.json({ hasImage: true });
+  } catch (error) {
+    next(error);
+  }
+});
 
 app.delete("/api/products/:id/image", authenticate, requireAnyModule("products", "inventory"), requireRoles("admin", "manager", "inventory_manager"), async (req, res, next) => {
   const id = positiveId(req.params.id);

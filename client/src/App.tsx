@@ -45,6 +45,22 @@ const aggregateCartItems = (items: PosCartLine[]) => {
   for (const item of items) quantities.set(item.product.id, (quantities.get(item.product.id) ?? 0) + item.quantity);
   return Array.from(quantities, ([productId, quantity]) => ({ productId, quantity: String(quantity) }));
 };
+const unitForPackageSize = (value: string): Product["unit"] | undefined => {
+  const match = value.match(/(?:^|\s)\d+(?:[.,]\d+)?\s*(kg|g|ml|l|litre|liter)\b/i);
+  const unit = match?.[1]?.toLowerCase();
+  if (unit === "kg") return "kg";
+  if (unit === "g") return "g";
+  if (unit === "ml") return "ml";
+  if (unit === "l" || unit === "litre" || unit === "liter") return "litre";
+  return undefined;
+};
+const generateInternalBarcode = () => {
+  const randomParts = crypto.getRandomValues(new Uint32Array(2));
+  const randomDigits = ((BigInt(randomParts[0]!) << 32n) | BigInt(randomParts[1]!)) % 10_000_000_000n;
+  const data = `20${randomDigits.toString().padStart(10, "0")}`;
+  const weightedSum = [...data].reduce((sum, digit, index) => sum + Number(digit) * (index % 2 === 0 ? 1 : 3), 0);
+  return `${data}${(10 - (weightedSum % 10)) % 10}`;
+};
 
 function PermissionRoute({ module, user, children }: { module: string; user: User; children: ReactNode }) {
   if (user.modules?.includes(module)) return <>{children}</>;
@@ -337,7 +353,7 @@ function DashboardPage({ user }: { user: User }) {
   );
 }
 
-const productCsvFields = ["sku", "barcode", "name", "category", "unit", "sellingPrice", "purchasePrice", "taxRate", "reorderLevel", "openingStock", "currentStock"];
+const productCsvFields = ["sku", "barcode", "name", "brand", "packageSize", "description", "category", "unit", "sellingPrice", "purchasePrice", "taxRate", "reorderLevel", "openingStock", "currentStock"];
 
 function parseCsv(text: string): string[][] {
   const rows: string[][] = [];
@@ -393,16 +409,31 @@ function ProductsPage({ user }: { user: User }) {
   const [page, setPage] = useState(1);
   const [formError, setFormError] = useState("");
   const [success, setSuccess] = useState("");
+  const [lookupMessage, setLookupMessage] = useState("");
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [lookupImageUrl, setLookupImageUrl] = useState<string | null>(null);
+  const [barcodeCameraOpen, setBarcodeCameraOpen] = useState(false);
+  const [barcodeCameraScanning, setBarcodeCameraScanning] = useState(false);
+  const [barcodeCameraError, setBarcodeCameraError] = useState("");
+  const [manualLookupBarcode, setManualLookupBarcode] = useState("");
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<{ imported: number; failures: string[]; failureCount: number } | null>(null);
+  const productVideoRef = useRef<HTMLVideoElement>(null);
+  const productCameraControlsRef = useRef<{ stop: () => void } | null>(null);
+  const productBarcodeHandledRef = useRef(false);
+  const barcodeLookupRequestRef = useRef(false);
+  const lastLookupBarcodeRef = useRef("");
+  const autoLookupValuesRef = useRef<Partial<Record<"name" | "brand" | "category" | "packageSize" | "description" | "unit", string>>>({});
   const canManage = user.roles.some((role) => ["admin", "manager", "inventory_manager"].includes(role));
   const schema = z.object({
     sku: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/, "Use letters, numbers, dots, dashes, or underscores."),
     barcode: z.string().trim().max(64).optional(),
     name: z.string().trim().min(2).max(180),
+    brand: z.string().trim().max(120).optional(),
+    packageSize: z.string().trim().max(80).optional(),
+    description: z.string().trim().max(2000).optional(),
     category: z.string().trim().min(2).max(100),
     unit: z.enum(["piece", "packet", "carton", "kg", "g", "litre", "ml"]),
     sellingPrice: z.string().regex(/^\d{1,10}(\.\d{1,2})?$/).refine((value) => Number(value) > 0),
@@ -413,10 +444,145 @@ function ProductsPage({ user }: { user: User }) {
   });
   type ProductForm = z.infer<typeof schema>;
   const emptyForm: ProductForm = {
-    sku: "", barcode: "", name: "", category: "", unit: "piece",
+    sku: "", barcode: "", name: "", brand: "", packageSize: "", description: "", category: "", unit: "piece",
     sellingPrice: "", purchasePrice: "", taxRate: "0", reorderLevel: "0", openingStock: "0",
   };
   const form = useForm<ProductForm>({ resolver: zodResolver(schema), defaultValues: emptyForm });
+  const barcodeLookup = useMutation({
+    mutationFn: async (barcode: string) => (await api.post<{
+      found: boolean;
+      duplicate?: { id: number; sku: string; name: string; isActive: boolean };
+      externalLookupSkipped?: boolean;
+      name?: string;
+      brand?: string;
+      category?: string;
+      packageSize?: string;
+      description?: string;
+      imageUrl?: string;
+    }>("/products/lookup/barcode", { barcode })).data,
+    onSuccess: (result, barcode) => {
+      lastLookupBarcodeRef.current = barcode;
+      if (result.duplicate) {
+        setLookupImageUrl(null);
+        autoLookupValuesRef.current = {};
+        const status = result.duplicate.isActive ? "active" : "archived";
+        const message = `Barcode already belongs to ${status} product ${result.duplicate.name} (${result.duplicate.sku}).`;
+        setLookupMessage(message);
+        setFormError(message);
+        return;
+      }
+      if (!result.found) {
+        setLookupImageUrl(null);
+        autoLookupValuesRef.current = {};
+        setLookupMessage(result.externalLookupSkipped
+          ? "This barcode format is not supported by the external catalogue. The barcode was kept; enter product details manually."
+          : "Barcode not found in Open Food Facts. The barcode was kept; enter product details manually.");
+        return;
+      }
+      autoLookupValuesRef.current = {};
+      if (result.name) {
+        form.setValue("name", result.name, { shouldDirty: true });
+        autoLookupValuesRef.current.name = result.name;
+      }
+      if (result.brand) {
+        form.setValue("brand", result.brand, { shouldDirty: true });
+        autoLookupValuesRef.current.brand = result.brand;
+      }
+      if (result.category) {
+        form.setValue("category", result.category, { shouldDirty: true });
+        autoLookupValuesRef.current.category = result.category;
+      }
+      if (result.packageSize) {
+        form.setValue("packageSize", result.packageSize, { shouldDirty: true });
+        autoLookupValuesRef.current.packageSize = result.packageSize;
+        const unit = unitForPackageSize(result.packageSize);
+        if (unit) {
+          form.setValue("unit", unit, { shouldDirty: true });
+          autoLookupValuesRef.current.unit = unit;
+        }
+      }
+      if (result.description) {
+        form.setValue("description", result.description, { shouldDirty: true });
+        autoLookupValuesRef.current.description = result.description;
+      }
+      setLookupImageUrl(result.imageUrl ?? null);
+      setLookupMessage(`Product information found for ${barcode}. Review and edit it before saving.`);
+      setFormError("");
+    },
+    onError: (error) => {
+      setLookupMessage("");
+      setFormError(`${getErrorMessage(error)} The scanned barcode remains in the form; enter product details manually.`);
+    },
+    onSettled: () => { barcodeLookupRequestRef.current = false; },
+  });
+  const lookupBarcode = (barcode: string) => {
+    const value = barcode.trim();
+    if (barcodeLookupRequestRef.current) return;
+    if (!/^[\x21-\x7E]{1,64}$/.test(value)) {
+      setFormError("Enter a printable barcode of up to 64 characters.");
+      return;
+    }
+    if (lastLookupBarcodeRef.current && lastLookupBarcodeRef.current !== value) {
+      for (const [field, previousValue] of Object.entries(autoLookupValuesRef.current) as Array<[keyof typeof autoLookupValuesRef.current, string]>) {
+        if (form.getValues(field) === previousValue) {
+          form.setValue(field, field === "unit" ? "piece" : "", { shouldDirty: true });
+        }
+      }
+      autoLookupValuesRef.current = {};
+      lastLookupBarcodeRef.current = "";
+      setLookupImageUrl(null);
+    }
+    setFormError("");
+    setSuccess("");
+    setLookupMessage("");
+    barcodeLookupRequestRef.current = true;
+    barcodeLookup.mutate(value);
+  };
+  const stopProductCamera = () => {
+    productCameraControlsRef.current?.stop();
+    productCameraControlsRef.current = null;
+    setBarcodeCameraScanning(false);
+  };
+  const startProductCamera = async () => {
+    setBarcodeCameraError("");
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+      setBarcodeCameraError("Camera access requires this page to be opened over trusted HTTPS.");
+      return;
+    }
+    const video = productVideoRef.current;
+    if (!video) return;
+    try {
+      const { BrowserMultiFormatReader: Reader } = await import("@zxing/browser");
+      const permissionStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } } });
+      permissionStream.getTracks().forEach((track) => track.stop());
+      const devices = await Reader.listVideoInputDevices();
+      const rearCamera = devices.find((device) => /back|rear|environment/i.test(device.label)) ?? devices.at(-1);
+      productBarcodeHandledRef.current = false;
+      productCameraControlsRef.current = await new Reader().decodeFromVideoDevice(
+        rearCamera?.deviceId,
+        video,
+        (decoded) => {
+          if (!decoded || productBarcodeHandledRef.current) return;
+          const barcode = decoded.getText().trim();
+          if (!/^[\x21-\x7E]{1,64}$/.test(barcode)) {
+            setBarcodeCameraError("This code is not a supported printable barcode.");
+            return;
+          }
+          productBarcodeHandledRef.current = true;
+          form.setValue("barcode", barcode, { shouldDirty: true });
+          setManualLookupBarcode(barcode);
+          setBarcodeCameraOpen(false);
+          stopProductCamera();
+          lookupBarcode(barcode);
+        },
+      );
+      setBarcodeCameraScanning(true);
+    } catch (error) {
+      setBarcodeCameraError(error instanceof Error ? error.message : "The rear camera could not be started.");
+      setBarcodeCameraScanning(false);
+    }
+  };
+  useEffect(() => () => productCameraControlsRef.current?.stop(), []);
   const filters = { search, category, stockStatus, sort, direction };
   const products = useQuery({
     queryKey: ["products", filters, page],
@@ -450,13 +616,23 @@ function ProductsPage({ user }: { user: User }) {
         } catch (error) {
           imageError = getErrorMessage(error);
         }
+      } else if (lookupImageUrl) {
+        try {
+          await api.post(`/products/${data.product.id}/image/import`, { imageUrl: lookupImageUrl });
+        } catch (error) {
+          imageError = getErrorMessage(error);
+        }
       }
       return imageError;
     },
     onSuccess: (imageError) => {
       form.reset(emptyForm);
       setImageFile(null);
+      setLookupImageUrl(null);
+      autoLookupValuesRef.current = {};
+      lastLookupBarcodeRef.current = "";
       setFormError("");
+      setLookupMessage("");
       setSuccess(imageError
         ? `Product saved, but its image could not be uploaded: ${imageError}`
         : "Product saved. Its opening stock is now in the branch ledger.");
@@ -471,7 +647,8 @@ function ProductsPage({ user }: { user: User }) {
   const update = useMutation({
     mutationFn: async (values: ProductForm) => {
       await api.patch(`/products/${editingProduct!.id}`, {
-        sku: values.sku, barcode: values.barcode || null, name: values.name, category: values.category,
+        sku: values.sku, barcode: values.barcode || null, name: values.name,
+        brand: values.brand || null, packageSize: values.packageSize || null, description: values.description || null, category: values.category,
         unit: values.unit, sellingPrice: values.sellingPrice, purchasePrice: values.purchasePrice || null,
         taxRate: values.taxRate, reorderLevel: values.reorderLevel,
       });
@@ -482,12 +659,22 @@ function ProductsPage({ user }: { user: User }) {
         } catch (error) {
           imageError = getErrorMessage(error);
         }
+      } else if (lookupImageUrl) {
+        try {
+          await api.post(`/products/${editingProduct!.id}/image/import`, { imageUrl: lookupImageUrl });
+        } catch (error) {
+          imageError = getErrorMessage(error);
+        }
       }
       return imageError;
     },
     onSuccess: (imageError) => {
       setEditingProduct(null);
       setImageFile(null);
+      setLookupImageUrl(null);
+      autoLookupValuesRef.current = {};
+      lastLookupBarcodeRef.current = "";
+      setLookupMessage("");
       form.reset(emptyForm);
       setSuccess(imageError ? `Product details saved, but its image could not be uploaded: ${imageError}` : "Product details updated.");
       void query.invalidateQueries({ queryKey: ["products"] });
@@ -537,7 +724,7 @@ function ProductsPage({ user }: { user: User }) {
       downloadCsv("smart-pos-products.csv", [
         productCsvFields,
         ...rows.map((product) => [
-          product.sku, product.barcode ?? "", product.name, product.category, product.unit,
+          product.sku, product.barcode ?? "", product.name, product.brand ?? "", product.packageSize ?? "", product.description ?? "", product.category, product.unit,
           product.sellingPrice, product.purchasePrice ?? "", product.taxRate, product.reorderLevel, "0", product.stock,
         ]),
       ]);
@@ -556,6 +743,7 @@ function ProductsPage({ user }: { user: User }) {
       const headerNames = headerRow.map((header) => header.trim().toLowerCase().replace(/[^a-z0-9]/g, ""));
       const aliases: Record<string, string[]> = {
         sku: ["sku", "productcode", "code"], barcode: ["barcode"], name: ["name", "productname"],
+        brand: ["brand"], packageSize: ["packagesize", "packsize", "size"], description: ["description"],
         category: ["category"], unit: ["unit"], sellingPrice: ["sellingprice", "price"],
         purchasePrice: ["purchaseprice", "purchasecost"], taxRate: ["taxrate", "tax"],
         reorderLevel: ["reorderlevel", "reorderat"], openingStock: ["openingstock", "stock"],
@@ -574,7 +762,9 @@ function ProductsPage({ user }: { user: User }) {
           return columnIndex >= 0 ? row[columnIndex]?.trim() ?? fallback : fallback;
         };
         const parsed = schema.safeParse({
-          sku: value("sku"), barcode: value("barcode"), name: value("name"), category: value("category"),
+          sku: value("sku"), barcode: value("barcode"), name: value("name"),
+          brand: value("brand"), packageSize: value("packageSize"), category: value("category"),
+          description: value("description"),
           unit: value("unit"), sellingPrice: value("sellingPrice"), purchasePrice: value("purchasePrice"),
           taxRate: value("taxRate", "0") || "0", reorderLevel: value("reorderLevel", "0") || "0",
           openingStock: value("openingStock", "0") || "0",
@@ -652,7 +842,7 @@ function ProductsPage({ user }: { user: User }) {
                   {product.hasImage
                     ? <img className="product-thumbnail" src={`/api/products/${product.id}/image`} alt="" loading="lazy" />
                     : <span>{product.name.slice(0, 1).toUpperCase()}</span>}
-                  <div><strong>{product.name}</strong><small>{product.unit}</small></div>
+                  <div><strong>{product.name}</strong><small>{[product.brand, product.packageSize || product.unit].filter(Boolean).join(" · ")}</small></div>
                 </div></td>
                 <td className="sku-cell">{product.sku}<small className="secondary-code">{product.barcode || "No barcode"}</small></td>
                 <td>{product.category}</td>
@@ -664,9 +854,14 @@ function ProductsPage({ user }: { user: User }) {
                   <button className="small-action" onClick={() => {
                     setEditingProduct(product);
                     setImageFile(null);
+                    setLookupImageUrl(null);
+                    autoLookupValuesRef.current = {};
+                    lastLookupBarcodeRef.current = "";
                     setFormError("");
+                    setLookupMessage("");
                     form.reset({
-                      sku: product.sku, barcode: product.barcode ?? "", name: product.name, category: product.category,
+                      sku: product.sku, barcode: product.barcode ?? "", name: product.name,
+                      brand: product.brand ?? "", packageSize: product.packageSize ?? "", description: product.description ?? "", category: product.category,
                       unit: product.unit as ProductForm["unit"], sellingPrice: product.sellingPrice,
                       purchasePrice: product.purchasePrice ?? "", taxRate: product.taxRate,
                       reorderLevel: product.reorderLevel, openingStock: "0",
@@ -689,8 +884,8 @@ function ProductsPage({ user }: { user: User }) {
         <form className="product-form" onSubmit={form.handleSubmit((values) => { setFormError(""); setSuccess(""); editingProduct ? update.mutate(values) : create.mutate(values); })}>
           <div className="product-image-field"><span>Product image</span>
             <div className="product-image-editor">
-              {imagePreview || (editingProduct?.hasImage ? `/api/products/${editingProduct.id}/image` : null)
-                ? <img src={imagePreview ?? `/api/products/${editingProduct!.id}/image`} alt="Product preview" />
+              {imagePreview || lookupImageUrl || (editingProduct?.hasImage ? `/api/products/${editingProduct.id}/image` : null)
+                ? <img src={imagePreview ?? lookupImageUrl ?? `/api/products/${editingProduct!.id}/image`} alt="Product preview" />
                 : <span>{editingProduct?.name.slice(0, 1).toUpperCase() ?? "+"}</span>}
               <div><label className="small-action file-action"><Upload size={14} /> Choose image<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => {
                 const file = event.target.files?.[0];
@@ -700,6 +895,7 @@ function ProductsPage({ user }: { user: User }) {
                 } else {
                   setFormError("");
                   setImageFile(file);
+                  setLookupImageUrl(null);
                 }
                 event.currentTarget.value = "";
               }} /></label>
@@ -710,8 +906,34 @@ function ProductsPage({ user }: { user: User }) {
           <label>Product name<input placeholder="e.g. Long-life milk 1L" {...form.register("name")} />{form.formState.errors.name && <small>{form.formState.errors.name.message}</small>}</label>
           <div className="form-pair">
             <label>SKU / product code<input placeholder="e.g. DAIR-012" {...form.register("sku")} />{form.formState.errors.sku && <small>Enter a valid SKU.</small>}</label>
-            <label>Barcode<input placeholder="Optional" {...form.register("barcode")} /></label>
+            <label>Barcode
+                <div className="product-barcode-actions"><input placeholder="Scan or enter barcode" autoComplete="off" {...form.register("barcode")} onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    lookupBarcode(event.currentTarget.value);
+                  }
+                }} />
+                <button className="small-action" type="button" disabled={barcodeLookup.isPending} onClick={() => { setBarcodeCameraError(""); setManualLookupBarcode(form.getValues("barcode") ?? ""); setBarcodeCameraOpen(true); }}><Camera size={14} /> Scan</button>
+                <button className="small-action" type="button" disabled={barcodeLookup.isPending} onClick={() => lookupBarcode(form.getValues("barcode") ?? "")}>{barcodeLookup.isPending ? "Looking up…" : "Look up"}</button>
+              </div>
+              <button className="product-internal-barcode" type="button" onClick={() => {
+                form.setValue("barcode", generateInternalBarcode(), { shouldDirty: true });
+                setLookupImageUrl(null);
+                autoLookupValuesRef.current = {};
+                lastLookupBarcodeRef.current = "";
+                setLookupMessage("");
+                setSuccess("An internal-use EAN-13 barcode was generated. Print or attach a matching label before using it.");
+                setFormError("");
+              }}>Generate internal EAN-13</button>
+              {lookupImageUrl && <small>Product image from Open Food Facts will be saved with this product.</small>}
+              {lookupMessage && <small className="product-lookup-message" role="status">{lookupMessage}</small>}
+            </label>
           </div>
+          <div className="form-pair">
+            <label>Brand<input placeholder="Optional" {...form.register("brand")} /></label>
+            <label>Packaging size<input placeholder="e.g. 500 g or 1 L" {...form.register("packageSize")} /></label>
+          </div>
+          <label>Product description<textarea rows={3} placeholder="Optional product description" {...form.register("description")} /></label>
           <div className="form-pair">
             <label>Category<input placeholder="e.g. Dairy" list="product-category-options" {...form.register("category")} /><datalist id="product-category-options">{categories.data?.map((item) => <option value={item} key={item} />)}</datalist></label>
             <label>Unit<select {...form.register("unit")}><option value="piece">Piece</option><option value="packet">Packet</option><option value="carton">Carton</option><option value="kg">Kilogram</option><option value="g">Gram</option><option value="litre">Litre</option><option value="ml">Millilitre</option></select></label>
@@ -726,9 +948,48 @@ function ProductsPage({ user }: { user: User }) {
           </div>
           {!editingProduct && <label>Opening stock<input inputMode="decimal" placeholder="0" {...form.register("openingStock")} /></label>}
           <button className="button button-dark create-product-button" disabled={create.isPending || update.isPending}><Plus size={16} /> {editingProduct ? update.isPending ? "Updating…" : "Save changes" : create.isPending ? "Saving product…" : "Save product"} <ArrowUpRight size={15} /></button>
-          {editingProduct ? <button type="button" className="small-action" onClick={() => { setEditingProduct(null); setImageFile(null); form.reset(emptyForm); }}>Cancel editing</button> : <div className="checkout-footnote"><ShieldCheck size={14} /> Opening stock is recorded in the stock ledger</div>}
+          {editingProduct ? <button type="button" className="small-action" onClick={() => {
+            setEditingProduct(null);
+            setImageFile(null);
+            setLookupImageUrl(null);
+            autoLookupValuesRef.current = {};
+            lastLookupBarcodeRef.current = "";
+            form.reset(emptyForm);
+          }}>Cancel editing</button> : <div className="checkout-footnote"><ShieldCheck size={14} /> Opening stock is recorded in the stock ledger</div>}
         </form>
       </section>}
+      {barcodeCameraOpen && <div className="product-barcode-backdrop" role="dialog" aria-modal="true" aria-labelledby="product-barcode-title">
+        <section className="product-barcode-dialog">
+          <button className="product-barcode-close" type="button" aria-label="Close barcode scanner" onClick={() => { setBarcodeCameraOpen(false); stopProductCamera(); }}><X size={18} /></button>
+          <span className="eyebrow">PRODUCT LOOKUP</span>
+          <h2 id="product-barcode-title">Scan a product barcode</h2>
+          <p>Use your device camera or enter the barcode manually. Product details are retrieved from Open Food Facts when available.</p>
+          <video ref={productVideoRef} muted playsInline autoPlay aria-label="Live barcode camera preview" />
+          {barcodeCameraError && <div className="pos-login-error" role="alert">{barcodeCameraError}</div>}
+          <div className="product-barcode-dialog-actions">
+            {!barcodeCameraScanning
+              ? <button className="button button-dark" type="button" onClick={() => void startProductCamera()}><Camera size={15} /> Start camera</button>
+              : <button className="small-action" type="button" onClick={stopProductCamera}><CameraOff size={15} /> Stop camera</button>}
+          </div>
+          <form className="product-barcode-manual" onSubmit={(event) => {
+            event.preventDefault();
+            const barcode = manualLookupBarcode.trim();
+            if (!/^[\x21-\x7E]{1,64}$/.test(barcode)) {
+              setBarcodeCameraError("Enter a printable barcode of up to 64 characters.");
+              return;
+            }
+            form.setValue("barcode", barcode, { shouldDirty: true });
+            setBarcodeCameraOpen(false);
+            stopProductCamera();
+            lookupBarcode(barcode);
+          }}>
+            <label htmlFor="manual-product-barcode">Manual barcode entry</label>
+            <div><input id="manual-product-barcode" value={manualLookupBarcode} onChange={(event) => setManualLookupBarcode(event.target.value)} autoComplete="off" maxLength={64} />
+              <button className="small-action" type="submit" disabled={barcodeLookup.isPending}>{barcodeLookup.isPending ? "Looking up…" : "Use & look up"}</button></div>
+          </form>
+          <small>Supports EAN-13, EAN-8, UPC-A, UPC-E and Code 128. Internet product lookup is available for EAN/UPC formats only. Camera access requires HTTPS.</small>
+        </section>
+      </div>}
     </section>
   );
 }
@@ -2129,6 +2390,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const saleTableRef = useRef<HTMLDivElement>(null);
   const lineIdRef = useRef(0);
   const isAddingProductRef = useRef(false);
+  const scanInputRef = useRef({ value: "", lastInputAt: 0, rapidCharacters: 0 });
   const idempotencyRef = useRef<string | null>(null);
   const processedPhoneScansRef = useRef(new Set<string>());
   const phoneScanAcknowledgementsRef = useRef(new Map<string, {
@@ -2355,10 +2617,11 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
               params: { barcode: scan.barcode },
             });
             if (!data.product) {
-              acknowledgement = { status: "unknown", message: `Barcode ${scan.barcode} was not found in this branch's catalogue.` };
+              acknowledgement = { status: "unknown", message: "Product not found in inventory. Contact administrator." };
               setCheckoutError(acknowledgement.message);
             } else if (addProduct(data.product)) {
-              const productDetails = `${data.product.name} · ${money(data.product.sellingPrice)} each · ${Number(data.product.stock).toLocaleString("en-KE", { maximumFractionDigits: 3 })} available before sale.`;
+              const productLabel = [data.product.brand, data.product.packageSize].filter(Boolean).join(" · ");
+              const productDetails = `${data.product.name}${productLabel ? ` (${productLabel})` : ""} · ${money(data.product.sellingPrice)} each · ${Number(data.product.stock).toLocaleString("en-KE", { maximumFractionDigits: 3 })} available before sale.`;
               acknowledgement = {
                 status: "added",
                 message: `${productDetails} Added to the sale.`,
@@ -2420,16 +2683,26 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     }
     isAddingProductRef.current = true;
     try {
-      const { data } = await api.get<{ products: Product[] }>("/products", { params: { search: code } });
-      const exact = data.products.find((product) => product.barcode === code || product.sku === code);
-      const match = exact ?? data.products[selectedSearchIndex] ?? data.products[0];
+      const rapidScan = scanInputRef.current.value === code && scanInputRef.current.rapidCharacters >= 6;
+      const barcodeScan = /^(?:\d{8}|\d{12,13})$/.test(code) || rapidScan;
+      let match: Product | undefined;
+      if (barcodeScan) {
+        const { data } = await api.get<{ product: Product | null }>("/pos/scanner/product", { params: { barcode: code } });
+        match = data.product ?? undefined;
+      } else {
+        const { data } = await api.get<{ products: Product[] }>("/products", { params: { search: code } });
+        const exact = data.products.find((product) => product.barcode === code || product.sku === code);
+        match = exact ?? data.products[selectedSearchIndex] ?? data.products[0];
+      }
       if (match) {
         if (addProduct(match)) {
           setSearch("");
           setSelectedSearchIndex(0);
         }
       } else {
-        setCheckoutError(`No product found for “${code}”.`);
+        setCheckoutError(barcodeScan
+          ? "Product not found in inventory. Contact administrator."
+          : `No product found for “${code}”.`);
         setSearch("");
       }
     } catch (error) {
@@ -2438,6 +2711,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       window.requestAnimationFrame(() => {
         scannerRef.current?.focus({ preventScroll: true });
         isAddingProductRef.current = false;
+        scanInputRef.current = { value: "", lastInputAt: 0, rapidCharacters: 0 };
       });
     }
   };
@@ -2629,7 +2903,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
               <thead><tr><th>No.</th><th>Product code</th><th>Product name</th><th>Qty</th><th>Unit price</th><th>Total</th><th>Action</th></tr></thead>
               <tbody>
                 {cart.map(({ lineId, product, quantity }, index) => <tr className="pos-product-row" key={lineId}>
-                  <td>{index + 1}</td><td className="pos-product-code">{product.sku}</td><td className="pos-product-name">{product.name}</td>
+                  <td>{index + 1}</td><td className="pos-product-code">{product.sku}</td><td className="pos-product-name">{product.name}{(product.brand || product.packageSize) && <small className="pos-product-meta">{[product.brand, product.packageSize].filter(Boolean).join(" · ")}</small>}</td>
                   <td><div className="pos-table-qty"><button onClick={() => adjust(lineId, -1)}>−</button><input value={quantity} onChange={(event) => {
                     const next = Number(event.target.value);
                     if (Number.isFinite(next)) setLineQuantity(lineId, next);
@@ -2649,7 +2923,22 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
                       spellCheck={false}
                       value={search}
                       onKeyDown={scan}
-                      onChange={(event) => { setSearch(event.target.value); setSelectedSearchIndex(0); }}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        const now = performance.now();
+                        const previous = scanInputRef.current;
+                        const addedCharacters = Math.max(0, value.length - previous.value.length);
+                        scanInputRef.current = {
+                          value,
+                          lastInputAt: now,
+                          rapidCharacters: value.startsWith(previous.value) && value.length > previous.value.length
+                            && now - previous.lastInputAt <= 40
+                            ? previous.rapidCharacters + addedCharacters
+                            : addedCharacters,
+                        };
+                        setSearch(value);
+                        setSelectedSearchIndex(0);
+                      }}
                     />
                     {search.trim() && <div className="pos-search-results">
                       {(productsQuery.data ?? []).slice(0, 8).map((product, index) => <button key={product.id} className={index === selectedSearchIndex ? "selected" : ""} onMouseEnter={() => setSelectedSearchIndex(index)} onClick={() => {

@@ -299,6 +299,8 @@ export async function lookupPosBarcode(barcode: string, branchId: number) {
     id: number;
     sku: string;
     name: string;
+    brand: string | null;
+    package_size: string | null;
     category_name: string;
     unit: string;
     selling_price: string;
@@ -309,7 +311,7 @@ export async function lookupPosBarcode(barcode: string, branchId: number) {
     barcode: string | null;
     has_image: number;
   } & RowDataPacket>>(
-    `SELECT p.id, p.sku, p.name, COALESCE(c.name, 'Uncategorised') AS category_name,
+    `SELECT p.id, p.sku, p.name, p.brand, p.package_size, COALESCE(c.name, 'Uncategorised') AS category_name,
             p.unit, p.selling_price, p.purchase_price, p.tax_rate, p.reorder_level,
             GREATEST(COALESCE(i.on_hand - i.reserved, 0) - COALESCE(expired.quantity, 0), 0) AS stock,
             p.barcode, (p.image_mime_type IS NOT NULL) AS has_image
@@ -331,6 +333,8 @@ export async function lookupPosBarcode(barcode: string, branchId: number) {
     id: product.id,
     sku: product.sku,
     name: product.name,
+    brand: product.brand,
+    packageSize: product.package_size,
     category: product.category_name,
     unit: product.unit,
     sellingPrice: product.selling_price,

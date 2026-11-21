@@ -22,8 +22,11 @@ export type Product = {
   id: number;
   sku: string;
   name: string;
+  brand?: string | null;
+  packageSize?: string | null;
+  description?: string | null;
   category: string;
-  unit: string;
+  unit: "piece" | "packet" | "carton" | "kg" | "g" | "litre" | "ml";
   sellingPrice: string;
   purchasePrice: string | null;
   taxRate: string;

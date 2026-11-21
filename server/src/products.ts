@@ -12,6 +12,9 @@ export const productSchema = z.object({
   sku: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/),
   barcode: z.string().trim().max(64).optional().transform((value) => value || null),
   name: z.string().trim().min(2).max(180),
+  brand: z.string().trim().max(120).optional().transform((value) => value || null),
+  packageSize: z.string().trim().max(80).optional().transform((value) => value || null),
+  description: z.string().trim().max(2000).optional().transform((value) => value || null),
   category: z.string().trim().min(2).max(100),
   unit: z.enum(["piece", "packet", "carton", "kg", "g", "litre", "ml"]),
   sellingPrice: productMoney,
@@ -27,6 +30,9 @@ export const updateProductSchema = z.object({
   sku: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9._-]+$/).optional(),
   barcode: z.union([z.string().trim().max(64), z.null()]).optional(),
   name: z.string().trim().min(2).max(180).optional(),
+  brand: z.union([z.string().trim().max(120), z.null()]).optional(),
+  packageSize: z.union([z.string().trim().max(80), z.null()]).optional(),
+  description: z.union([z.string().trim().max(2000), z.null()]).optional(),
   category: z.string().trim().min(2).max(100).optional(),
   unit: z.enum(["piece", "packet", "carton", "kg", "g", "litre", "ml"]).optional(),
   sellingPrice: productMoney.optional(),
@@ -46,10 +52,11 @@ export async function registerProduct(input: NewProduct, user: AuthUser) {
       );
       if (!categoryRows[0]) throw new Error("The requested product category could not be created.");
       const [result] = await connection.execute(
-        `INSERT INTO products (category_id, sku, barcode, name, unit, selling_price, purchase_price, tax_rate, reorder_level)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO products
+         (category_id, sku, barcode, name, brand, package_size, description, unit, selling_price, purchase_price, tax_rate, reorder_level)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          categoryRows[0].id, input.sku, input.barcode, input.name, input.unit,
+          categoryRows[0].id, input.sku, input.barcode, input.name, input.brand, input.packageSize, input.description, input.unit,
           input.sellingPrice, input.purchasePrice || null, input.taxRate, input.reorderLevel,
         ],
       );
@@ -127,7 +134,8 @@ export async function updateProduct(id: number, input: z.infer<typeof updateProd
         categoryId = categories[0].id;
       }
       const columns: Record<string, string> = {
-        sku: "sku", barcode: "barcode", name: "name", unit: "unit", sellingPrice: "selling_price",
+        sku: "sku", barcode: "barcode", name: "name", brand: "brand", packageSize: "package_size", description: "description",
+        unit: "unit", sellingPrice: "selling_price",
         purchasePrice: "purchase_price", taxRate: "tax_rate", reorderLevel: "reorder_level", isActive: "is_active",
       };
       const values: Array<string | number | boolean | null> = [];
