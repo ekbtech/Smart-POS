@@ -3,7 +3,7 @@ import {
   ArrowDownLeft, ArrowLeftRight, ArrowUpDown, ArrowUpRight, Boxes, CalendarDays, Camera, CameraOff, ChevronDown, CircleDollarSign,
   Command, LayoutDashboard, LogOut, PackagePlus, Plus, Search, ShieldCheck,
   ShoppingBasket, ShoppingCart, TrendingUp, X, Users, Truck, Banknote, ReceiptText, RotateCcw, Download,
-  Pause, Printer, QrCode, RefreshCw, Smartphone, Trash2, Upload,
+  Pause, Printer, QrCode, RefreshCw, ScanBarcode, Smartphone, Trash2, Upload,
 } from "lucide-react";
 import type { BrowserMultiFormatReader } from "@zxing/browser";
 import { lazy, Suspense, useMemo, useRef, useState } from "react";
@@ -411,6 +411,7 @@ function ProductsPage({ user }: { user: User }) {
   const [success, setSuccess] = useState("");
   const [lookupMessage, setLookupMessage] = useState("");
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [productFormOpen, setProductFormOpen] = useState(true);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [lookupImageUrl, setLookupImageUrl] = useState<string | null>(null);
@@ -437,7 +438,7 @@ function ProductsPage({ user }: { user: User }) {
     barcode: z.string().trim().max(64).optional(),
     name: z.string().trim().min(2).max(180),
     brand: z.string().trim().max(120).optional(),
-    packageSize: z.string().trim().max(80).optional(),
+    packageSize: z.string().trim().min(1, "Packaging size is required.").max(80),
     description: z.string().trim().max(2000).optional(),
     category: z.string().trim().min(2).max(100),
     unit: z.enum(["piece", "packet", "carton", "kg", "g", "litre", "ml"]),
@@ -910,23 +911,156 @@ function ProductsPage({ user }: { user: User }) {
   return (
     <section className="page-content products-page">
       <div className="page-heading">
-        <div><div className="eyebrow"><span className="eyebrow-dot" /> CATALOGUE</div><h1>Product catalogue<span className="heading-period">.</span></h1><p>Manage product details, pricing, images and branch stock levels.</p></div>
+        <div><div className="eyebrow"><span className="eyebrow-dot" /> PRODUCT MANAGEMENT</div><h1>{editingProduct ? "Edit product" : productFormOpen ? "Add a product" : "Product catalogue"}<span className="heading-period">.</span></h1><p>{productFormOpen ? "Scan a barcode to identify products, then review details and stock before saving." : "Manage your products, prices and branch stock levels."}</p></div>
         <div className="products-heading-actions">
-          {canManage && !editingProduct && <button className="button button-dark product-phone-scanner-button" type="button" disabled={createRegistrationPairing.isPending} onClick={() => {
-            setRegistrationScannerOpen(true);
-            setRegistrationScannerError("");
-            if (!registrationPairing
-              || Date.now() >= Date.parse(registrationPairing.expiresAt)
-              || registrationScannerQuery.data?.paired) {
-              createRegistrationPairing.mutate();
-            }
-          }}><Smartphone size={16} /> {createRegistrationPairing.isPending ? "Creating QR…" : "Connect Phone Scanner"}</button>}
+          {canManage && !productFormOpen && <button className="button button-dark product-add-button" type="button" onClick={() => { setProductFormOpen(true); setEditingProduct(null); form.reset(emptyForm); }}><Plus size={16} /> Add Product</button>}
           <div className="product-total"><PackagePlus size={17} /> {pagination?.total ?? "—"} PRODUCTS</div>
         </div>
       </div>
       {success && <div role="status" className="success-banner">{success}<button onClick={() => setSuccess("")} aria-label="Dismiss"><X size={15} /></button></div>}
       {formError && <ErrorBanner message={formError} onRetry={() => setFormError("")} />}
-      <section className="panel product-table-panel">
+      {canManage && productFormOpen && <section className="panel create-product-panel">
+        <div className="create-heading"><div className="create-icon"><PackagePlus size={17} /></div><div><div className="eyebrow">PRODUCT REGISTRATION</div><h2>{editingProduct ? "Product information" : "New inventory item"}</h2></div></div>
+        <p className="create-description">{editingProduct ? "Update product details while preserving its existing inventory history." : "Identify the product, confirm its details and set the opening stock for this branch."}</p>
+        <form className="product-form" onSubmit={form.handleSubmit((values) => { setFormError(""); setSuccess(""); editingProduct ? update.mutate(values) : create.mutate(values); })}>
+          <section className="product-scan-panel" aria-labelledby="product-scan-heading">
+            <div className="product-scan-copy"><div className="product-scan-icon"><ScanBarcode size={22} /></div><div><h3 id="product-scan-heading">Scan product barcode</h3><p>USB scanners can scan directly here. Look up new barcodes against the local catalogue first, then external product information.</p></div></div>
+            <div className="product-scan-controls">
+              <label className="product-scan-input" htmlFor="product-registration-barcode">
+                <span>Barcode</span>
+                <input id="product-registration-barcode" placeholder="Scan or enter barcode" autoComplete="off" {...form.register("barcode")} onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    lookupBarcode(event.currentTarget.value);
+                  }
+                }} />
+              </label>
+              <button className="small-action" type="button" disabled={barcodeLookup.isPending} onClick={() => { setBarcodeCameraError(""); setManualLookupBarcode(form.getValues("barcode") ?? ""); setBarcodeCameraOpen(true); }}><Camera size={15} /> Camera</button>
+              <button className="small-action product-lookup-button" type="button" disabled={barcodeLookup.isPending} onClick={() => lookupBarcode(form.getValues("barcode") ?? "")}>
+                {barcodeLookup.isPending ? <><RefreshCw size={14} className="product-loading-icon" /> Looking up…</> : <><Search size={14} /> Look up</>}
+              </button>
+              {!editingProduct && <button className="button button-dark product-phone-scanner-button" type="button" disabled={createRegistrationPairing.isPending} onClick={() => {
+                setRegistrationScannerOpen(true);
+                setRegistrationScannerError("");
+                if (!registrationPairing
+                  || Date.now() >= Date.parse(registrationPairing.expiresAt)
+                  || registrationScannerQuery.data?.paired) {
+                  createRegistrationPairing.mutate();
+                }
+              }}><Smartphone size={16} /> {createRegistrationPairing.isPending ? "Creating QR…" : "Connect Phone Scanner"}</button>}
+            </div>
+            <div className="product-scan-feedback" aria-live="polite">
+              {barcodeLookup.isPending
+                ? <><RefreshCw size={14} className="product-loading-icon" /> Checking the catalogue and product sources…</>
+                : lookupMessage
+                  ? <><ShieldCheck size={14} /> {lookupMessage}</>
+                  : form.formState.errors.barcode
+                    ? <span className="product-validation-message">{form.formState.errors.barcode.message}</span>
+                    : <><ShieldCheck size={14} /> Product details will be retrieved where available and can be edited before saving.</>}
+            </div>
+            <button className="product-internal-barcode" type="button" onClick={() => {
+              form.setValue("barcode", generateInternalBarcode(), { shouldDirty: true });
+              setLookupImageUrl(null);
+              autoLookupValuesRef.current = {};
+              lastLookupBarcodeRef.current = "";
+              setLookupMessage("");
+              setSuccess("An internal-use EAN-13 barcode was generated. Print or attach a matching label before using it.");
+              setFormError("");
+            }}>Generate internal EAN-13</button>
+          </section>
+
+          <section className="product-information-section" aria-labelledby="product-information-heading">
+            <div className="product-section-heading"><div className="product-section-icon"><PackagePlus size={18} /></div><div><h3 id="product-information-heading">Product information</h3><p>Review and edit the product identity and catalogue details.</p></div></div>
+            <div className="product-information-layout">
+              <div className="product-image-field">
+                <span className="product-image-label">Product image</span>
+                <div className="product-image-preview">
+                  {imagePreview || lookupImageUrl || (editingProduct?.hasImage ? `/api/products/${editingProduct.id}/image` : null)
+                    ? <img src={imagePreview ?? lookupImageUrl ?? `/api/products/${editingProduct!.id}/image`} alt="Product preview" />
+                    : <div className="product-image-empty"><PackagePlus size={30} /><span>Product image preview</span></div>}
+                </div>
+                <div className="product-image-actions">
+                  <label className="small-action file-action"><Upload size={14} /> Change image<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (!file) return;
+                    if (!["image/jpeg", "image/png", "image/webp"].includes(file.type) || file.size > 5 * 1024 * 1024) {
+                      setFormError("Choose a JPEG, PNG, or WebP image up to 5 MB.");
+                    } else {
+                      setFormError("");
+                      setImageFile(file);
+                      setLookupImageUrl(null);
+                    }
+                    event.currentTarget.value = "";
+                  }} /></label>
+                  {(imageFile || lookupImageUrl || editingProduct?.hasImage) && <button type="button" className="small-action small-action-danger" disabled={removeImage.isPending} onClick={() => {
+                    if (editingProduct?.hasImage && !imageFile && !lookupImageUrl) removeImage.mutate(editingProduct.id);
+                    else { setImageFile(null); setLookupImageUrl(null); }
+                  }}><Trash2 size={14} /> {removeImage.isPending ? "Removing…" : "Remove image"}</button>}
+                </div>
+                <small className="product-image-hint">JPEG, PNG or WebP · maximum 5 MB</small>
+                {lookupImageUrl && <small className="product-image-hint">Matched image will be saved with this product.</small>}
+              </div>
+              <div className="product-information-fields">
+                <label>Product name <span className="required-mark">*</span><input placeholder="e.g. Long-life milk" {...form.register("name")} />{form.formState.errors.name && <small className="product-validation-message">{form.formState.errors.name.message}</small>}</label>
+                <label>Brand<input placeholder="Optional" {...form.register("brand")} /></label>
+                <label>Packaging size <span className="required-mark">*</span><input placeholder="e.g. 500 g or 1 L" {...form.register("packageSize")} />{form.formState.errors.packageSize && <small className="product-validation-message">{form.formState.errors.packageSize.message}</small>}</label>
+                <label>SKU / product code <span className="required-mark">*</span><input placeholder="e.g. DAIR-012" {...form.register("sku")} />{form.formState.errors.sku && <small className="product-validation-message">Enter a valid product code.</small>}</label>
+                <label>Category<input placeholder="e.g. Dairy" list="product-category-options" {...form.register("category")} /><datalist id="product-category-options">{categories.data?.map((item) => <option value={item} key={item} />)}</datalist>{form.formState.errors.category && <small className="product-validation-message">Enter a product category.</small>}</label>
+                <label>Unit of measurement<select {...form.register("unit")}><option value="piece">Piece</option><option value="packet">Packet</option><option value="carton">Carton</option><option value="kg">Kilogram</option><option value="g">Gram</option><option value="litre">Litre</option><option value="ml">Millilitre</option></select></label>
+                <label className="product-description-field">Product description<textarea rows={3} placeholder="Optional product description" {...form.register("description")} />{form.formState.errors.description && <small className="product-validation-message">Description must be 2,000 characters or fewer.</small>}</label>
+              </div>
+            </div>
+          </section>
+
+          <section className="product-business-section" aria-labelledby="product-business-heading">
+            <div className="product-section-heading"><div className="product-section-icon business"><CircleDollarSign size={18} /></div><div><h3 id="product-business-heading">Business details</h3><p>Set prices and stock thresholds for this branch.</p></div></div>
+            <div className="product-business-fields">
+              <label>Purchase price (KES)<input inputMode="decimal" placeholder="0.00" {...form.register("purchasePrice")} />{form.formState.errors.purchasePrice && <small className="product-validation-message">Enter a valid purchase price.</small>}</label>
+              <label>Selling price (KES) <span className="required-mark">*</span><input inputMode="decimal" placeholder="0.00" {...form.register("sellingPrice")} />{form.formState.errors.sellingPrice && <small className="product-validation-message">Enter a valid selling price.</small>}</label>
+              {!editingProduct && <label>Opening stock <span className="required-mark">*</span><input inputMode="decimal" placeholder="0" {...form.register("openingStock")} />{form.formState.errors.openingStock && <small className="product-validation-message">Enter a valid opening quantity.</small>}</label>}
+              <label>Minimum stock level<input inputMode="decimal" placeholder="0" {...form.register("reorderLevel")} />{form.formState.errors.reorderLevel && <small className="product-validation-message">Enter a valid minimum quantity.</small>}</label>
+              <label>Tax rate (%)<input inputMode="decimal" placeholder="0" {...form.register("taxRate")} />{form.formState.errors.taxRate && <small className="product-validation-message">Use a rate from 0 to 100.</small>}</label>
+            </div>
+          </section>
+
+          <div className="product-form-actions">
+            <div className="product-form-note"><ShieldCheck size={15} /> Opening stock is recorded in the branch stock ledger.</div>
+            <div className="product-form-buttons">
+              <button type="button" className="small-action" onClick={() => {
+                if (editingProduct) {
+                  form.reset({
+                    sku: editingProduct.sku, barcode: editingProduct.barcode ?? "", name: editingProduct.name,
+                    brand: editingProduct.brand ?? "", packageSize: editingProduct.packageSize ?? "", description: editingProduct.description ?? "", category: editingProduct.category,
+                    unit: editingProduct.unit as ProductForm["unit"], sellingPrice: editingProduct.sellingPrice,
+                    purchasePrice: editingProduct.purchasePrice ?? "", taxRate: editingProduct.taxRate,
+                    reorderLevel: editingProduct.reorderLevel, openingStock: "0",
+                  });
+                } else form.reset(emptyForm);
+                setImageFile(null);
+                setLookupImageUrl(null);
+                autoLookupValuesRef.current = {};
+                lastLookupBarcodeRef.current = "";
+                setLookupMessage("");
+                setFormError("");
+              }}><RotateCcw size={14} /> Reset</button>
+              <button type="button" className="small-action" onClick={() => {
+                setEditingProduct(null);
+                setProductFormOpen(false);
+                form.reset(emptyForm);
+                setImageFile(null);
+                setLookupImageUrl(null);
+                autoLookupValuesRef.current = {};
+                lastLookupBarcodeRef.current = "";
+                setLookupMessage("");
+                setFormError("");
+                document.getElementById("product-catalogue")?.scrollIntoView({ behavior: "smooth", block: "start" });
+              }}>Cancel</button>
+              <button className="button button-dark create-product-button" disabled={create.isPending || update.isPending}><Plus size={16} /> {editingProduct ? update.isPending ? "Updating…" : "Save changes" : create.isPending ? "Saving product…" : "Save Product"}</button>
+            </div>
+          </div>
+        </form>
+      </section>}
+      <section id="product-catalogue" className="panel product-table-panel">
         <div className="products-toolbar">
           <div><div className="eyebrow">PRODUCT LIST</div><h2>Catalogue</h2></div>
           <label className="table-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find by name, SKU or barcode" /></label>
@@ -976,6 +1110,7 @@ function ProductsPage({ user }: { user: User }) {
                 {canManage && <td className="row-actions">
                   <button className="small-action" onClick={() => {
                     setEditingProduct(product);
+                    setProductFormOpen(true);
                     setImageFile(null);
                     setLookupImageUrl(null);
                     autoLookupValuesRef.current = {};
@@ -1001,86 +1136,6 @@ function ProductsPage({ user }: { user: User }) {
           </div>
         </> : <EmptyState title="No products match these filters" detail="Adjust the search or filters, or register a new product." />}
       </section>
-      {canManage && <section className="panel create-product-panel">
-        <div className="create-heading"><div className="create-icon"><PackagePlus size={17} /></div><div><div className="eyebrow">CATALOGUE ACTION</div><h2>{editingProduct ? "Edit product" : "Add a product"}</h2></div></div>
-        <p className="create-description">{editingProduct ? "Changes apply to this product across the shared catalogue." : "Add product details, an optional image and opening stock for this branch."}</p>
-        <form className="product-form" onSubmit={form.handleSubmit((values) => { setFormError(""); setSuccess(""); editingProduct ? update.mutate(values) : create.mutate(values); })}>
-          <div className="product-image-field"><span>Product image</span>
-            <div className="product-image-editor">
-              {imagePreview || lookupImageUrl || (editingProduct?.hasImage ? `/api/products/${editingProduct.id}/image` : null)
-                ? <img src={imagePreview ?? lookupImageUrl ?? `/api/products/${editingProduct!.id}/image`} alt="Product preview" />
-                : <span>{editingProduct?.name.slice(0, 1).toUpperCase() ?? "+"}</span>}
-              <div><label className="small-action file-action"><Upload size={14} /> Choose image<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (!file) return;
-                if (!["image/jpeg", "image/png", "image/webp"].includes(file.type) || file.size > 5 * 1024 * 1024) {
-                  setFormError("Choose a JPEG, PNG, or WebP image up to 5 MB.");
-                } else {
-                  setFormError("");
-                  setImageFile(file);
-                  setLookupImageUrl(null);
-                }
-                event.currentTarget.value = "";
-              }} /></label>
-              <small>JPEG, PNG or WebP · maximum 5 MB</small>
-              {editingProduct?.hasImage && !imageFile && <button type="button" className="small-action small-action-danger" onClick={() => removeImage.mutate(editingProduct.id)} disabled={removeImage.isPending}>{removeImage.isPending ? "Removing…" : "Remove current image"}</button>}</div>
-            </div>
-          </div>
-          <label>Product name<input placeholder="e.g. Long-life milk 1L" {...form.register("name")} />{form.formState.errors.name && <small>{form.formState.errors.name.message}</small>}</label>
-          <div className="form-pair">
-            <label>SKU / product code<input placeholder="e.g. DAIR-012" {...form.register("sku")} />{form.formState.errors.sku && <small>Enter a valid SKU.</small>}</label>
-            <label>Barcode
-                <div className="product-barcode-actions"><input placeholder="Scan or enter barcode" autoComplete="off" {...form.register("barcode")} onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    lookupBarcode(event.currentTarget.value);
-                  }
-                }} />
-                <button className="small-action" type="button" disabled={barcodeLookup.isPending} onClick={() => { setBarcodeCameraError(""); setManualLookupBarcode(form.getValues("barcode") ?? ""); setBarcodeCameraOpen(true); }}><Camera size={14} /> Scan</button>
-                <button className="small-action" type="button" disabled={barcodeLookup.isPending} onClick={() => lookupBarcode(form.getValues("barcode") ?? "")}>{barcodeLookup.isPending ? "Looking up…" : "Look up"}</button>
-              </div>
-              <button className="product-internal-barcode" type="button" onClick={() => {
-                form.setValue("barcode", generateInternalBarcode(), { shouldDirty: true });
-                setLookupImageUrl(null);
-                autoLookupValuesRef.current = {};
-                lastLookupBarcodeRef.current = "";
-                setLookupMessage("");
-                setSuccess("An internal-use EAN-13 barcode was generated. Print or attach a matching label before using it.");
-                setFormError("");
-              }}>Generate internal EAN-13</button>
-              {lookupImageUrl && <small>Product image from Open Food Facts will be saved with this product.</small>}
-              {lookupMessage && <small className="product-lookup-message" role="status">{lookupMessage}</small>}
-            </label>
-          </div>
-          <div className="form-pair">
-            <label>Brand<input placeholder="Optional" {...form.register("brand")} /></label>
-            <label>Packaging size<input placeholder="e.g. 500 g or 1 L" {...form.register("packageSize")} /></label>
-          </div>
-          <label>Product description<textarea rows={3} placeholder="Optional product description" {...form.register("description")} /></label>
-          <div className="form-pair">
-            <label>Category<input placeholder="e.g. Dairy" list="product-category-options" {...form.register("category")} /><datalist id="product-category-options">{categories.data?.map((item) => <option value={item} key={item} />)}</datalist></label>
-            <label>Unit<select {...form.register("unit")}><option value="piece">Piece</option><option value="packet">Packet</option><option value="carton">Carton</option><option value="kg">Kilogram</option><option value="g">Gram</option><option value="litre">Litre</option><option value="ml">Millilitre</option></select></label>
-          </div>
-          <div className="form-pair">
-            <label>Selling price (KSh)<input inputMode="decimal" placeholder="0.00" {...form.register("sellingPrice")} />{form.formState.errors.sellingPrice && <small>Enter a valid amount.</small>}</label>
-            <label>Purchase cost (KSh)<input inputMode="decimal" placeholder="Optional" {...form.register("purchasePrice")} /></label>
-          </div>
-          <div className="form-pair">
-            <label>Tax rate (%)<input inputMode="decimal" placeholder="0" {...form.register("taxRate")} />{form.formState.errors.taxRate && <small>Use a rate from 0 to 100.</small>}</label>
-            <label>Reorder level<input inputMode="decimal" placeholder="0" {...form.register("reorderLevel")} /></label>
-          </div>
-          {!editingProduct && <label>Opening stock<input inputMode="decimal" placeholder="0" {...form.register("openingStock")} /></label>}
-          <button className="button button-dark create-product-button" disabled={create.isPending || update.isPending}><Plus size={16} /> {editingProduct ? update.isPending ? "Updating…" : "Save changes" : create.isPending ? "Saving product…" : "Save product"} <ArrowUpRight size={15} /></button>
-          {editingProduct ? <button type="button" className="small-action" onClick={() => {
-            setEditingProduct(null);
-            setImageFile(null);
-            setLookupImageUrl(null);
-            autoLookupValuesRef.current = {};
-            lastLookupBarcodeRef.current = "";
-            form.reset(emptyForm);
-          }}>Cancel editing</button> : <div className="checkout-footnote"><ShieldCheck size={14} /> Opening stock is recorded in the stock ledger</div>}
-        </form>
-      </section>}
       {barcodeCameraOpen && <div className="product-barcode-backdrop" role="dialog" aria-modal="true" aria-labelledby="product-barcode-title">
         <section className="product-barcode-dialog">
           <button className="product-barcode-close" type="button" aria-label="Close barcode scanner" onClick={() => { setBarcodeCameraOpen(false); stopProductCamera(); }}><X size={18} /></button>
