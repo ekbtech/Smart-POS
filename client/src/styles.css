@@ -958,6 +958,68 @@ button.inventory-metric:hover, button.inventory-metric.selected { border-color: 
 .access-denied-panel h1 { margin: 8px 0; color: #2b3c30; font: 500 26px Georgia, serif; }
 .access-denied-panel p { margin: 0; color: #748177; font-size: 12px; line-height: 1.6; }
 
+.pos-desktop .pos-actions { grid-template-columns: repeat(5, minmax(100px, 1fr)); }
+.pos-actions button:disabled { opacity: .5; cursor: not-allowed; }
+.phone-pairing-screen { inset: 0; padding: 18px; }
+.phone-pairing-card { position: relative; width: min(460px, calc(100vw - 32px)); max-height: calc(100vh - 36px); overflow-y: auto; border: 1px solid #dfe7df; border-radius: 10px; background: #fff; padding: 25px; box-shadow: 0 18px 50px rgba(15,35,22,.25); }
+.phone-pairing-close { position: absolute; top: 14px; right: 14px; width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid #e4e9e4; border-radius: 5px; background: #fff; color: #58675b; }
+.phone-pairing-card h2 { margin: 8px 36px 8px 0; color: #26382d; font: 500 24px Georgia, serif; }
+.phone-pairing-card > p { margin: 0 0 14px; color: #6f7e74; font-size: 11px; line-height: 1.6; }
+.phone-pairing-qr { width: 260px; height: 260px; display: block; margin: 18px auto; image-rendering: pixelated; }
+.phone-pairing-placeholder { min-height: 185px; display: grid; align-content: center; justify-items: center; gap: 12px; color: #849287; text-align: center; }
+.phone-pairing-status { display: flex; align-items: center; gap: 12px; margin: 18px 0; padding: 15px; border: 1px solid #e7e9dc; border-radius: 7px; background: #fafaf4; color: #96743d; }
+.phone-pairing-status.connected { border-color: #cee3d2; background: #f2faf3; color: #3e8050; }
+.phone-pairing-status > div { display: grid; gap: 4px; }
+.phone-pairing-status strong { font-size: 12px; }
+.phone-pairing-status span { font-size: 10px; }
+.phone-pairing-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 16px; }
+.phone-pairing-actions > span { color: #77847a; font-size: 9px; }
+.phone-pairing-actions button { min-height: 38px; padding: 0 13px; border: 0; border-radius: 5px; font-size: 10px; font-weight: 700; }
+.phone-pairing-actions .confirm { background: #17633a; color: #fff; }
+.phone-pairing-actions .cancel { background: #edf3ee; color: #31583d; }
+.phone-pairing-actions button:disabled { opacity: .55; cursor: wait; }
+.phone-pairing-security { display: block; margin-top: 15px; color: #87938a; font-size: 9px; line-height: 1.5; }
+
+.mobile-scanner-page { min-height: 100vh; min-height: 100dvh; padding: 16px; background: #edf2ee; color: #29382e; }
+.mobile-scanner-header { width: min(520px, 100%); display: flex; align-items: center; gap: 10px; margin: 0 auto 16px; padding: 8px 2px; }
+.mobile-scanner-header .brand-mark { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 7px; background: #17633a; color: #fff; font: 600 21px Georgia, serif; }
+.mobile-scanner-header > div { display: grid; gap: 3px; }
+.mobile-scanner-header > div strong { color: #25412e; font-size: 14px; }
+.mobile-scanner-header > div small { color: #7d8b80; font-size: 9px; }
+.scanner-connection { display: flex; align-items: center; gap: 6px; margin-left: auto; color: #8b7660; font-size: 9px; }
+.scanner-connection i { width: 7px; height: 7px; border-radius: 50%; background: #d29d55; }
+.scanner-connection.connected { color: #428250; }
+.scanner-connection.connected i { background: #3eaa5c; }
+.mobile-scanner-card { width: min(520px, 100%); margin: 0 auto; padding: 20px; border: 1px solid #dfe7df; border-radius: 10px; background: #fff; box-shadow: 0 12px 30px rgba(34,58,39,.07); }
+.mobile-scanner-card h1 { margin: 8px 0 5px; color: #26382d; font: 500 27px Georgia, serif; }
+.mobile-scanner-card > p { margin: 0 0 15px; color: #748177; font-size: 11px; line-height: 1.55; }
+.scanner-notice { margin-bottom: 12px; padding: 10px; border: 1px solid #f0d8bc; border-radius: 5px; background: #fff9f2; color: #93663a; font-size: 10px; line-height: 1.5; }
+.scanner-waiting { min-height: 230px; display: grid; align-content: center; justify-items: center; gap: 11px; padding: 18px; border: 1px dashed #cbd9ce; border-radius: 7px; background: #f8fbf8; color: #598064; text-align: center; }
+.scanner-waiting strong { color: #355b3e; font-size: 13px; }
+.scanner-waiting span { max-width: 300px; color: #7a897e; font-size: 10px; line-height: 1.5; }
+.scanner-video-wrap { position: relative; overflow: hidden; width: 100%; aspect-ratio: 4 / 3; border-radius: 8px; background: #101713; }
+.scanner-video-wrap video { width: 100%; height: 100%; display: block; object-fit: cover; }
+.scanner-camera-placeholder { position: absolute; inset: 0; display: grid; align-content: center; justify-items: center; gap: 9px; color: #b6c4b8; font-size: 10px; }
+.scanner-target { position: absolute; inset: 23% 10%; display: grid; place-items: center; border: 2px solid rgba(255,255,255,.82); border-radius: 8px; pointer-events: none; }
+.scanner-target i { width: 100%; height: 1px; background: #ee5650; box-shadow: 0 0 6px #ee5650; }
+.scanner-controls { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 11px; }
+.scanner-controls button, .scanner-manual-form button { min-height: 42px; display: flex; align-items: center; justify-content: center; gap: 8px; border: 0; border-radius: 5px; font-size: 11px; font-weight: 700; }
+.scanner-primary { background: #17633a; color: #fff; }
+.scanner-stop { background: #fff1ef; color: #ad5144; }
+.scanner-reconnect { padding: 0 12px; border: 1px solid #dfe7df !important; background: #fff; color: #526457; }
+.scanner-manual-form { display: grid; gap: 7px; margin-top: 17px; }
+.scanner-manual-form label { color: #526457; font-size: 10px; font-weight: 700; }
+.scanner-manual-form > div { display: grid; grid-template-columns: minmax(0, 1fr) 74px; gap: 7px; }
+.scanner-manual-form input { width: 100%; min-width: 0; height: 42px; padding: 0 10px; border: 1px solid #dce5dd; border-radius: 5px; outline: 0; font-size: 14px; }
+.scanner-manual-form input:focus { border-color: #76a37e; box-shadow: 0 0 0 2px #edf5ed; }
+.scanner-manual-form button { min-height: 42px; background: #eaf3ec; color: #31583d; }
+.scanner-manual-form button:disabled { opacity: .5; cursor: not-allowed; }
+.scanner-feedback { min-height: 44px; display: grid; align-content: center; gap: 4px; margin-top: 12px; padding: 9px 10px; border: 1px solid #e3e9e3; border-radius: 5px; background: #f8faf8; color: #67766b; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.scanner-feedback.success { border-color: #cfe5d3; background: #f2faf3; color: #3d7c4a; }
+.scanner-feedback.failure { border-color: #efd2cc; background: #fff7f5; color: #a54f44; }
+.scanner-feedback small { color: inherit; font-size: 9px; }
+.mobile-scanner-card .scanner-format-note { margin: 12px 0 0; color: #8b978d; font-size: 9px; text-align: center; }
+
 @media (max-width: 790px) {
   .user-management-form .staff-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .staff-table-controls { align-items: stretch; flex-wrap: wrap; }

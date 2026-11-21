@@ -4,7 +4,7 @@ import cors from "cors";
 import express from "express";
 import { rateLimit } from "express-rate-limit";
 import helmet from "helmet";
-import { ZodError } from "zod";
+import { z, ZodError } from "zod";
 import {
   authenticate, authenticatePos, changePassword, currentUser, login, logout, posLogin, posLogout, requireRoles, requireModule,
 } from "./auth.js";
@@ -34,6 +34,11 @@ import {
   getInventoryTransfer, inventoryTransferReceiptSchema, inventoryTransferSchema, listInventoryTransfers,
   listTransferBranches, receiveInventoryTransfer,
 } from "./operations.js";
+import {
+  acknowledgeScannerScan, createScannerPairing, exchangeScannerPairing, getScannerStatus,
+  lookupPosBarcode, pollScannerScans, reconnectScanner, revokeScannerPairing,
+  scannerAckSchema, scannerPairSchema, scannerScanSchema, submitScannerBarcode,
+} from "./mobile-scanner.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 4000);
@@ -85,6 +90,17 @@ function positiveId(value: string | string[] | undefined): number | undefined {
   return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
+function scannerPairingId(value: string | string[] | undefined): string | undefined {
+  return typeof value === "string" && z.uuid().safeParse(value).success ? value : undefined;
+}
+
+function scannerBearerToken(req: express.Request): string {
+  const authorization = req.header("authorization") ?? "";
+  const match = /^Bearer ([A-Za-z0-9_-]{40,100})$/.exec(authorization);
+  if (!match?.[1]) throw new HttpError(401, "Phone scanner authentication is required.");
+  return match[1];
+}
+
 function positiveQueryInteger(value: unknown, fallback: number, maximum: number): number | undefined {
   if (value === undefined) return fallback;
   if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) return undefined;
@@ -130,6 +146,100 @@ app.get("/api/pos/session", authenticate, authenticatePos, (req, res) => {
   res.json({ cashier: { ...req.posUser, username: req.posUser?.posUsername } });
 });
 app.post("/api/pos/logout", authenticate, authenticatePos, (req, res, next) => void posLogout(req, res).catch(next));
+app.post("/api/pos/scanner/pairing", authenticate, authenticatePos, requireModule("pos"), (req, res, next) => {
+  try {
+    if (!req.posSessionId || !req.posUser) throw new HttpError(401, "POS authentication required.");
+    void createScannerPairing(req.posUser, req.posSessionId).then(
+      (pairing) => res.status(201).json(pairing),
+      next,
+    );
+  } catch (error) {
+    next(error);
+  }
+});
+app.post("/api/pos/scanner/pair/:id", (req, res, next) => {
+  const id = scannerPairingId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid scanner pairing ID." }); return; }
+  try {
+    const input = scannerPairSchema.parse(req.body);
+    void exchangeScannerPairing(id, input.token).then((result) => res.json(result), next);
+  } catch (error) {
+    next(error);
+  }
+});
+app.post("/api/pos/scanner/:id/reconnect", (req, res, next) => {
+  const id = scannerPairingId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid scanner pairing ID." }); return; }
+  try {
+    void reconnectScanner(id, scannerBearerToken(req)).then((result) => res.json(result), next);
+  } catch (error) {
+    next(error);
+  }
+});
+app.get("/api/pos/scanner/:id/status", (req, res, next) => {
+  const id = scannerPairingId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid scanner pairing ID." }); return; }
+  try {
+    void getScannerStatus(id, scannerBearerToken(req)).then((result) => res.json(result), next);
+  } catch (error) {
+    next(error);
+  }
+});
+app.post("/api/pos/scanner/:id/scans", (req, res, next) => {
+  const id = scannerPairingId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid scanner pairing ID." }); return; }
+  try {
+    const input = scannerScanSchema.parse(req.body);
+    void submitScannerBarcode(id, scannerBearerToken(req), input.barcode).then(
+      (result) => res.status(202).json(result),
+      next,
+    );
+  } catch (error) {
+    next(error);
+  }
+});
+app.get("/api/pos/scanner/pairing/:id/poll", authenticate, authenticatePos, requireModule("pos"), (req, res, next) => {
+  const id = scannerPairingId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid scanner pairing ID." }); return; }
+  try {
+    if (!req.posSessionId) throw new HttpError(401, "POS authentication required.");
+    void pollScannerScans(id, req.posSessionId).then((result) => res.json(result), next);
+  } catch (error) {
+    next(error);
+  }
+});
+app.post("/api/pos/scanner/pairing/:id/ack", authenticate, authenticatePos, requireModule("pos"), (req, res, next) => {
+  const id = scannerPairingId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid scanner pairing ID." }); return; }
+  try {
+    const input = scannerAckSchema.parse(req.body);
+    if (!req.posSessionId) throw new HttpError(401, "POS authentication required.");
+    void acknowledgeScannerScan(id, req.posSessionId, input).then((result) => res.json(result), next);
+  } catch (error) {
+    next(error);
+  }
+});
+app.delete("/api/pos/scanner/pairing/:id", authenticate, authenticatePos, requireModule("pos"), (req, res, next) => {
+  const id = scannerPairingId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid scanner pairing ID." }); return; }
+  try {
+    if (!req.posSessionId) throw new HttpError(401, "POS authentication required.");
+    void revokeScannerPairing(id, req.posSessionId).then(() => res.status(204).end(), next);
+  } catch (error) {
+    next(error);
+  }
+});
+app.get("/api/pos/scanner/product", authenticate, authenticatePos, requireModule("pos"), async (req, res, next) => {
+  const barcode = typeof req.query.barcode === "string" ? req.query.barcode.trim() : "";
+  const parsed = scannerScanSchema.safeParse({ barcode });
+  if (!parsed.success) { res.status(400).json({ error: "Enter a valid product barcode." }); return; }
+  try {
+    const product = await lookupPosBarcode(parsed.data.barcode, req.posUser!.branchId);
+    res.json({ product });
+  } catch (error) {
+    next(error);
+  }
+});
 
 app.get("/api/access/modules", authenticate, requireRoles("admin"), async (_req, res, next) => {
   try {

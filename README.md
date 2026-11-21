@@ -15,6 +15,20 @@ A React + TypeScript retail operations application with an Express API and MySQL
 4. Run `npm run db:migrate` and `npm run db:seed`.
 5. Run `npm run dev`. The web app is at `http://localhost:5173`; the API listens on port 4000.
 
+### Android phone barcode scanner
+
+The cashier can choose **Phone scanner** in POS to pair one Android phone with the current register. The phone opens the Smart POS app at `/mobile-scanner`, uses the rear camera (EAN-13, EAN-8, UPC-A, UPC-E, and Code 128), and sends barcodes to the paired cashier session. The register looks up active products and available stock for the cashier's branch and adds valid scans to the current sale. Manual barcode entry and reconnect controls are also available on the phone. The cashier can disconnect the paired phone from the pairing dialog. Scans only add items to the current cart; checkout remains responsible for sale completion and stock deduction.
+
+For remote use across different networks, deploy the frontend and API at publicly reachable HTTPS origins and configure:
+
+- `CLIENT_ORIGIN` to the exact frontend origin (scheme and host, plus port if nonstandard), allowing the browser's credentialed API requests.
+- `VITE_API_BASE_URL` to the deployed API base URL, including `/api`.
+- `VITE_PUBLIC_APP_URL` to the frontend HTTPS origin embedded in the pairing QR code.
+
+These `VITE_*` values are read at frontend build time. Rebuild the client after changing them. The API uses HTTPS-secure cross-origin session cookies in production. Android camera access requires a trusted HTTPS context. For local development, configure `SMARTPOS_TLS_CERT` and `SMARTPOS_TLS_KEY` with trusted certificate paths relative to the repository root, and use a certificate whose subject alternative name matches the frontend hostname. Do not expose the development server directly to the internet.
+
+Apply the `015_mobile_scanner.sql` migration with `npm run db:migrate` before deploying the API. Pairing tokens are single-use and expire after 90 seconds; scanner bearer tokens are stored only as hashes, bound to the active POS session and branch, and revoked when the cashier disconnects or logs out. Pending scans and pairing state are stored in MySQL, so they survive API restarts and can be shared by multiple API instances. The phone and register exchange status and queued scans using authenticated HTTPS polling (not WebSockets); the POS polls approximately every 1.2 seconds. Pair again if the pairing expires. Verify the deployed HTTPS origins, CORS configuration, migration, and Android camera access in the target environment before relying on remote scanning.
+
 The seed command refuses to run without an explicitly configured admin password. Keep `.env` private.
 
 ## API

@@ -6,6 +6,7 @@ import jwt from "jsonwebtoken";
 import type { RowDataPacket } from "mysql2/promise";
 import { z } from "zod";
 import { execute, pool, query, withTransaction } from "./db.js";
+import { revokeScannerPairingsForPosSession } from "./mobile-scanner.js";
 
 function getJwtSecret(): string {
   const value = process.env.JWT_SECRET;
@@ -16,6 +17,7 @@ const secret = getJwtSecret();
 
 const sessionCookie = "smart_pos_session";
 const posSessionCookie = "smart_pos_pos_session";
+const cookieSameSite: "lax" | "none" = process.env.NODE_ENV === "production" ? "none" : "lax";
 const ttl = process.env.JWT_TTL ?? "8h";
 const landingModuleIds = new Set([
   "dashboard", "pos", "sales", "products", "inventory", "purchases", "suppliers",
@@ -178,7 +180,7 @@ export async function login(req: Request, res: Response): Promise<void> {
   const token = jwt.sign({ sid: sessionId }, secret, { subject: String(user.id), expiresIn: ttl as jwt.SignOptions["expiresIn"] });
   res.cookie(sessionCookie, token, {
     httpOnly: true,
-    sameSite: "lax",
+    sameSite: cookieSameSite,
     secure: process.env.NODE_ENV === "production",
     expires: expiresAt,
     path: "/",
@@ -350,7 +352,7 @@ export async function logout(req: Request, res: Response): Promise<void> {
     );
     await execute("DELETE FROM auth_sessions WHERE id = ?", [req.sessionId]);
   }
-  res.clearCookie(sessionCookie, { httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production", path: "/" });
+  res.clearCookie(sessionCookie, { httpOnly: true, sameSite: cookieSameSite, secure: process.env.NODE_ENV === "production", path: "/" });
   res.status(204).end();
 }
 
@@ -421,12 +423,12 @@ export async function posLogin(req: Request, res: Response): Promise<void> {
       res.status(423).json({ error: "Too many failed attempts. This POS account is locked for 15 minutes." });
       return;
     }
-    if (user.must_change_password) {
-      res.status(403).json({ error: "Sign in to the staff workspace and change your temporary password before opening POS." });
-      return;
-    }
     await execute("UPDATE users SET pos_failed_attempts = ? WHERE id = ?", [attempts, user.id]);
     res.status(401).json({ error: "POS username or password is incorrect." });
+    return;
+  }
+  if (user.must_change_password) {
+    res.status(403).json({ error: "Sign in to the staff workspace and change your temporary password before opening POS." });
     return;
   }
   await execute("UPDATE users SET pos_failed_attempts = 0, pos_locked_until = NULL WHERE id = ?", [user.id]);
@@ -438,7 +440,7 @@ export async function posLogin(req: Request, res: Response): Promise<void> {
     [user.id, String(user.id)],
   );
   res.cookie(posSessionCookie, sessionId, {
-    httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production",
+    httpOnly: true, sameSite: cookieSameSite, secure: process.env.NODE_ENV === "production",
     expires: expiresAt, path: "/",
   });
   res.json({ cashier: { id: user.id, name: user.name, username: input.username.toLowerCase(), branchId: user.branch_id, roles: roleNames } });
@@ -485,12 +487,13 @@ export async function authenticatePos(req: Request, res: Response, next: NextFun
 
 export async function posLogout(req: Request, res: Response): Promise<void> {
   if (req.posUser && req.posSessionId) {
+    await revokeScannerPairingsForPosSession(req.posSessionId);
     await execute(
       "INSERT INTO audit_logs (user_id, action, entity_type, entity_id) VALUES (?, 'pos.logout', 'user', ?)",
       [req.posUser.id, String(req.posUser.id)],
     );
     await execute("DELETE FROM pos_sessions WHERE id = ?", [req.posSessionId]);
   }
-  res.clearCookie(posSessionCookie, { httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production", path: "/" });
+  res.clearCookie(posSessionCookie, { httpOnly: true, sameSite: cookieSameSite, secure: process.env.NODE_ENV === "production", path: "/" });
   res.status(204).end();
 }
