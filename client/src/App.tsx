@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowDownLeft, ArrowLeftRight, ArrowUpDown, ArrowUpRight, Boxes, CalendarDays, Camera, CameraOff, ChevronDown, CircleDollarSign,
-  Command, LayoutDashboard, LogOut, PackagePlus, Plus, Search, ShieldCheck,
+  Command, LayoutDashboard, LogOut, Menu, PackagePlus, Plus, Search, ShieldCheck,
   ShoppingBasket, ShoppingCart, TrendingUp, X, Users, Truck, Banknote, ReceiptText, RotateCcw, Download,
   Pause, Printer, QrCode, RefreshCw, ScanBarcode, Smartphone, Trash2, Upload,
 } from "lucide-react";
@@ -103,15 +103,18 @@ const workspaceNavigationItems = [
 ] as const;
 
 function WorkspaceNavigation({
-  user, className, linkClassName, showShortcuts = false,
-}: { user: User; className: string; linkClassName: string; showShortcuts?: boolean }) {
+  user, className, linkClassName, id, showShortcuts = false, onNavigate,
+}: { user: User; className: string; linkClassName: string; id?: string; showShortcuts?: boolean; onNavigate?: () => void }) {
   return (
-    <nav className={className} aria-label="Workspace navigation">
+    <nav className={className} id={id} aria-label="Workspace navigation">
       {workspaceNavigationItems.map((item) => user.modules?.includes(item.module) ? (
         <NavLink
           key={item.module}
           to={item.route}
           end={item.route === "/"}
+          onClick={onNavigate}
+          aria-label={item.label}
+          title={item.label}
           className={({ isActive }) => `${linkClassName}${isActive ? " active" : ""}`}
         >
           {item.icon}<span>{item.label}</span>{showShortcuts && item.module === "pos" && <span className="nav-shortcut">F2</span>}
@@ -120,6 +123,9 @@ function WorkspaceNavigation({
       {user.roles.includes("admin") && user.modules?.includes("permissions") && (
         <NavLink
           to="/staff"
+          onClick={onNavigate}
+          aria-label="User management"
+          title="User management"
           className={({ isActive }) => `${linkClassName}${isActive ? " active" : ""}`}
         >
           <ShieldCheck size={18} aria-hidden="true" /><span>User management</span>
@@ -296,12 +302,29 @@ function LoginPage({ onLogin }: { onLogin: (user: User) => void }) {
 function AppShell({ user }: { user: User }) {
   const location = useLocation();
   const query = useQueryClient();
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [isMobileViewport, setIsMobileViewport] = useState(() => window.matchMedia("(max-width: 790px)").matches);
   const logout = useMutation({
     mutationFn: () => api.post("/auth/logout"),
     onSettled: () => { query.clear(); window.location.assign("/"); },
   });
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(max-width: 790px)");
+    const updateViewport = () => {
+      setIsMobileViewport(mediaQuery.matches);
+      if (!mediaQuery.matches) setMobileSidebarOpen(false);
+    };
+    mediaQuery.addEventListener("change", updateViewport);
+    return () => mediaQuery.removeEventListener("change", updateViewport);
+  }, []);
+  useEffect(() => setMobileSidebarOpen(false), [location.pathname]);
   const isPos = location.pathname.startsWith("/pos");
   const isProducts = location.pathname.startsWith("/products");
+  const toggleSidebar = () => {
+    if (isMobileViewport) setMobileSidebarOpen((open) => !open);
+    else setSidebarCollapsed((collapsed) => !collapsed);
+  };
   const pageLabels: Record<string, string> = {
     "/inventory": "Inventory", "/suppliers": "Suppliers", "/purchases": "Purchasing",
     "/customers": "Customers", "/shifts": "Cashier shifts", "/expenses": "Expenses", "/sales": "Sales & returns",
@@ -316,12 +339,13 @@ function AppShell({ user }: { user: User }) {
     );
   }
   return (
-    <div className={`app-frame ${isPos ? "is-pos" : ""}`}>
-      <aside className="sidebar">
+    <div className={`app-frame${sidebarCollapsed ? " is-sidebar-collapsed" : ""}${mobileSidebarOpen ? " is-mobile-nav-open" : ""}`}>
+      {mobileSidebarOpen && <button className="sidebar-backdrop" aria-label="Close navigation" onClick={() => setMobileSidebarOpen(false)} />}
+      <aside className="sidebar" id="workspace-sidebar">
         <Link to="/" className="brand"><span className="brand-mark">s</span><span>smart<strong>pos</strong></span></Link>
         <div className="branch-switcher"><div className="branch-avatar">M</div><div><strong>Main branch</strong><small>Retail workspace</small></div><ChevronDown size={15} /></div>
         <div className="nav-caption">WORKSPACE</div>
-        <WorkspaceNavigation user={user} className="nav-list" linkClassName="nav-item" showShortcuts />
+        <WorkspaceNavigation user={user} className="nav-list" linkClassName="nav-item" showShortcuts onNavigate={() => setMobileSidebarOpen(false)} />
         <div className="sidebar-bottom">
           <div className="help-card"><div className="help-icon"><Command size={17} /></div><strong>Need a hand?</strong><p>Your store tools, all in one place.</p></div>
           <button className="user-menu" onClick={() => logout.mutate()} title="Sign out">
@@ -333,7 +357,21 @@ function AppShell({ user }: { user: User }) {
       </aside>
       <main className="main-area">
         <header className="topbar">
-          <div className="breadcrumb"><span>Workspace</span><span className="crumb-slash">/</span><strong>{isPos ? "Point of sale" : isProducts ? "Products" : pageLabel ?? "Overview"}</strong></div>
+          <div className="breadcrumb">
+            <button
+              type="button"
+              className="sidebar-toggle"
+              aria-label={isMobileViewport
+                ? (mobileSidebarOpen ? "Close navigation" : "Open navigation")
+                : (sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar")}
+              aria-controls="workspace-sidebar"
+              aria-expanded={isMobileViewport ? mobileSidebarOpen : !sidebarCollapsed}
+              onClick={toggleSidebar}
+            >
+              {mobileSidebarOpen ? <X size={18} aria-hidden="true" /> : <Menu size={18} aria-hidden="true" />}
+            </button>
+            <span>Workspace</span><span className="crumb-slash">/</span><strong>{isProducts ? "Products" : pageLabel ?? "Overview"}</strong>
+          </div>
           <div className="topbar-actions"><div className="online-status"><span /> WORKSPACE CONNECTED</div><button className="icon-button" onClick={() => logout.mutate()} aria-label="Sign out" title="Sign out"><LogOut size={16} /></button></div>
         </header>
         <Outlet />
@@ -2652,6 +2690,7 @@ function PosSignOutConfirmation({
 
 function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: number; name: string; username: string }; onLogout: () => void }) {
   const queryClient = useQueryClient();
+  const [mobileWorkspaceNavOpen, setMobileWorkspaceNavOpen] = useState(false);
   const canSell = user.roles.some((role) => ["admin", "manager", "cashier"].includes(role));
   const [search, setSearch] = useState("");
   const [cart, setCart] = useState<PosCartLine[]>([]);
@@ -3086,11 +3125,12 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       <section className="pos-close-screen">
         <header className="pos-dedicated-header">
           <div className="pos-header-brand"><strong>Smart POS</strong><span>{activeShift.data?.branchName ?? `Branch ${user.branchId}`}</span></div>
-          <WorkspaceNavigation user={user} className="pos-workspace-nav" linkClassName="pos-workspace-nav-link" />
+          <WorkspaceNavigation user={user} className={`pos-workspace-nav${mobileWorkspaceNavOpen ? " is-open" : ""}`} linkClassName="pos-workspace-nav-link" id="pos-workspace-navigation" />
           <div className="pos-header-cashier"><span>Cashier</span><strong>{cashier.username}</strong></div>
           <div className="pos-header-shift"><span>Shift</span><strong className={activeShift.data ? "open" : "closed"}>{activeShift.data ? "OPEN" : "CLOSED"}</strong></div>
           <button className="pos-header-action" onClick={() => setShiftCloseOpen(false)}>Back to POS</button>
           <button className="pos-header-signout" onClick={() => setSignOutConfirmOpen(true)}>Sign Out</button>
+          <button className="pos-mobile-nav-toggle" aria-label="Toggle workspace navigation" aria-controls="pos-workspace-navigation" aria-expanded={mobileWorkspaceNavOpen} onClick={() => setMobileWorkspaceNavOpen((open) => !open)}><Menu size={18} aria-hidden="true" /></button>
         </header>
         {signOutConfirmOpen && <PosSignOutConfirmation
           unfinishedItemCount={cart.reduce((sum, item) => sum + item.quantity, 0)}
@@ -3143,12 +3183,13 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     <section className="pos-page pos-desktop">
       <header className="pos-dedicated-header">
         <div className="pos-header-brand"><strong>Smart POS</strong><span>{activeShift.data?.branchName ?? `Branch ${user.branchId}`}</span></div>
-        <WorkspaceNavigation user={user} className="pos-workspace-nav" linkClassName="pos-workspace-nav-link" />
+        <WorkspaceNavigation user={user} className={`pos-workspace-nav${mobileWorkspaceNavOpen ? " is-open" : ""}`} linkClassName="pos-workspace-nav-link" id="pos-workspace-navigation" />
         <div className="pos-header-cashier"><span>Cashier</span><strong>{cashier.username}</strong></div>
         <div className="pos-header-time"><span>{new Date().toLocaleDateString("en-KE", { weekday: "short", year: "numeric", month: "short", day: "2-digit" })}</span><strong>{new Date().toLocaleTimeString("en-KE", { hour: "2-digit", minute: "2-digit" })}</strong></div>
         <div className="pos-header-shift"><span>Shift</span><strong className={activeShift.data ? "open" : "closed"}>{activeShift.data ? "OPEN" : "CLOSED"}</strong></div>
         <button className="pos-header-action" onClick={() => setShiftCloseOpen(true)}>Shift Change</button>
         <button className="pos-header-signout" onClick={() => setSignOutConfirmOpen(true)}>Sign Out</button>
+        <button className="pos-mobile-nav-toggle" aria-label="Toggle workspace navigation" aria-controls="pos-workspace-navigation" aria-expanded={mobileWorkspaceNavOpen} onClick={() => setMobileWorkspaceNavOpen((open) => !open)}><Menu size={18} aria-hidden="true" /></button>
       </header>
       {signOutConfirmOpen && <PosSignOutConfirmation
         unfinishedItemCount={cart.reduce((sum, item) => sum + item.quantity, 0)}
