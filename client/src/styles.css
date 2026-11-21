@@ -386,11 +386,13 @@ a { color: inherit; text-decoration: none; }
 .is-pos .sidebar { display: flex; }
 .is-pos .topbar { display: flex; }
 .is-pos .main-area { margin-left: 248px; }
-.pos-desktop { min-height: calc(100vh - 65px); display: block; padding: 0; background: #eef2ee; }
+.pos-desktop { width: 100%; height: 100vh; min-height: 0; display: flex; flex-direction: column; overflow: hidden; padding: 0; background: #eef2ee; }
 .pos-desktop .pos-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 330px;
-  height: calc(100vh - 65px);
+  flex: 1 1 0;
+  min-height: 0;
+  height: auto;
   gap: 0;
   padding: 0;
   overflow: hidden;
@@ -518,6 +520,19 @@ a { color: inherit; text-decoration: none; }
 .pos-dedicated-header div { display: grid; gap: 3px; }
 .pos-dedicated-header span { color: #bad0c1; font-size: 9px; }
 .pos-dedicated-header button { height: 32px; border: 1px solid rgba(255,255,255,.25); border-radius: 4px; background: transparent; color: #fff; font-size: 9px; }
+.pos-dedicated-header { position: relative; z-index: 20; flex: 0 0 56px; gap: 10px; }
+.pos-header-brand { flex: 0 0 auto; min-width: 76px; }
+.pos-workspace-nav { min-width: 0; flex: 1 1 auto; height: 100%; display: flex; align-items: center; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+.pos-workspace-nav::-webkit-scrollbar { display: none; }
+.pos-workspace-nav-link { height: 36px; display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; border-radius: 5px; padding: 0 7px; color: #d8eadf; font-size: 10px; text-decoration: none; white-space: nowrap; }
+.pos-workspace-nav-link svg { width: 15px; height: 15px; }
+.pos-workspace-nav-link:hover, .pos-workspace-nav-link:focus-visible { background: rgba(255,255,255,.1); color: #fff; outline: none; }
+.pos-workspace-nav-link.active { background: rgba(255,255,255,.16); color: #fff; font-weight: 700; }
+.pos-header-cashier, .pos-header-time, .pos-header-shift { min-width: 0; flex: 0 0 auto; }
+.pos-header-cashier strong { max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pos-header-action, .pos-header-signout { flex: 0 0 auto; padding: 0 9px; }
+.pos-desktop .pos-dedicated-header { flex: 0 0 56px; }
+.pos-desktop .pos-statusbar { flex: 0 0 34px; }
 .is-pos .main-area { margin-left: 248px; }
 .is-pos .topbar { display: none; }
 
@@ -535,6 +550,8 @@ a { color: inherit; text-decoration: none; }
   .pos-page { padding-right: 22px; padding-left: 22px; }
   .pos-layout { grid-template-columns: minmax(0, 1fr) 310px; gap: 11px; }
   .product-grid { gap: 8px; }
+  .pos-workspace-nav-link { gap: 4px; padding: 0 5px; font-size: 9px; }
+  .pos-header-time { display: none; }
 }
 @media (max-width: 790px) {
   .sidebar { position: static; width: auto; height: 58px; flex-direction: row; align-items: center; justify-content: space-between; padding: 0 17px; border-right: 0; border-bottom: 1px solid var(--line); }
@@ -556,6 +573,15 @@ a { color: inherit; text-decoration: none; }
   .cart-items { max-height: 240px; }
   .pos-bottomline { flex-wrap: wrap; }
   .is-pos .topbar { display: none; }
+  .pos-dedicated-header { height: auto; min-height: 56px; flex-basis: auto; flex-wrap: wrap; justify-content: flex-start; padding: 7px 10px; gap: 6px 9px; }
+  .pos-header-brand { order: 0; }
+  .pos-header-cashier { order: 1; }
+  .pos-header-shift { order: 2; }
+  .pos-header-action { order: 3; }
+  .pos-header-signout { order: 4; }
+  .pos-workspace-nav { order: 5; flex: 0 0 100%; height: 34px; }
+  .pos-workspace-nav-link { height: 31px; }
+  .pos-desktop .pos-dedicated-header { flex-basis: auto; }
 }
 @media (max-width: 560px) {
   .login-page { min-height: 100vh; padding: 20px; }

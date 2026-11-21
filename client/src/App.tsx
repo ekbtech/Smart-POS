@@ -88,6 +88,47 @@ function getLandingPath(user: User): string {
   return fallback ? routeMap[fallback]! : "/access-denied";
 }
 
+const workspaceNavigationItems = [
+  { module: "dashboard", route: "/", label: "Overview", icon: <LayoutDashboard size={18} aria-hidden="true" /> },
+  { module: "pos", route: "/pos", label: "Point of sale", icon: <ShoppingBasket size={18} aria-hidden="true" /> },
+  { module: "products", route: "/products", label: "Products", icon: <Boxes size={18} aria-hidden="true" /> },
+  { module: "inventory", route: "/inventory", label: "Inventory", icon: <ArrowLeftRight size={18} aria-hidden="true" /> },
+  { module: "purchases", route: "/purchases", label: "Purchasing", icon: <Truck size={18} aria-hidden="true" /> },
+  { module: "suppliers", route: "/suppliers", label: "Suppliers", icon: <Users size={18} aria-hidden="true" /> },
+  { module: "customers", route: "/customers", label: "Customers", icon: <Users size={18} aria-hidden="true" /> },
+  { module: "shifts", route: "/shifts", label: "Cashier shifts", icon: <Banknote size={18} aria-hidden="true" /> },
+  { module: "expenses", route: "/expenses", label: "Expenses", icon: <ReceiptText size={18} aria-hidden="true" /> },
+  { module: "reports", route: "/reports", label: "Reports", icon: <TrendingUp size={18} aria-hidden="true" /> },
+  { module: "sales", route: "/sales", label: "Sales & returns", icon: <RotateCcw size={18} aria-hidden="true" /> },
+] as const;
+
+function WorkspaceNavigation({
+  user, className, linkClassName, showShortcuts = false,
+}: { user: User; className: string; linkClassName: string; showShortcuts?: boolean }) {
+  return (
+    <nav className={className} aria-label="Workspace navigation">
+      {workspaceNavigationItems.map((item) => user.modules?.includes(item.module) ? (
+        <NavLink
+          key={item.module}
+          to={item.route}
+          end={item.route === "/"}
+          className={({ isActive }) => `${linkClassName}${isActive ? " active" : ""}`}
+        >
+          {item.icon}<span>{item.label}</span>{showShortcuts && item.module === "pos" && <span className="nav-shortcut">F2</span>}
+        </NavLink>
+      ) : null)}
+      {user.roles.includes("admin") && user.modules?.includes("permissions") && (
+        <NavLink
+          to="/staff"
+          className={({ isActive }) => `${linkClassName}${isActive ? " active" : ""}`}
+        >
+          <ShieldCheck size={18} aria-hidden="true" /><span>User management</span>
+        </NavLink>
+      )}
+    </nav>
+  );
+}
+
 function LandingRoute({ user }: { user: User }) {
   const landing = getLandingPath(user);
   if (landing === "/") {
@@ -280,20 +321,7 @@ function AppShell({ user }: { user: User }) {
         <Link to="/" className="brand"><span className="brand-mark">s</span><span>smart<strong>pos</strong></span></Link>
         <div className="branch-switcher"><div className="branch-avatar">M</div><div><strong>Main branch</strong><small>Retail workspace</small></div><ChevronDown size={15} /></div>
         <div className="nav-caption">WORKSPACE</div>
-        <nav className="nav-list">
-          {user.modules?.includes("dashboard") && <NavLink to="/" end className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><LayoutDashboard size={18} /> Overview</NavLink>}
-          {user.modules?.includes("pos") && <NavLink to="/pos" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><ShoppingBasket size={18} /> Point of sale <span className="nav-shortcut">F2</span></NavLink>}
-          {user.modules?.includes("products") && <NavLink to="/products" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Boxes size={18} /> Products</NavLink>}
-          {user.modules?.includes("inventory") && <NavLink to="/inventory" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><ArrowLeftRight size={18} /> Inventory</NavLink>}
-          {user.modules?.includes("purchases") && <NavLink to="/purchases" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Truck size={18} /> Purchasing</NavLink>}
-          {user.modules?.includes("suppliers") && <NavLink to="/suppliers" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Users size={18} /> Suppliers</NavLink>}
-          {user.modules?.includes("customers") && <NavLink to="/customers" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Users size={18} /> Customers</NavLink>}
-          {user.modules?.includes("shifts") && <NavLink to="/shifts" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Banknote size={18} /> Cashier shifts</NavLink>}
-          {user.modules?.includes("expenses") && <NavLink to="/expenses" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><ReceiptText size={18} /> Expenses</NavLink>}
-          {user.modules?.includes("reports") && <NavLink to="/reports" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><TrendingUp size={18} /> Reports</NavLink>}
-          {user.modules?.includes("sales") && <NavLink to="/sales" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><RotateCcw size={18} /> Sales & returns</NavLink>}
-          {user.roles.includes("admin") && user.modules?.includes("permissions") && <NavLink to="/staff" className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><ShieldCheck size={18} /> User management</NavLink>}
-        </nav>
+        <WorkspaceNavigation user={user} className="nav-list" linkClassName="nav-item" showShortcuts />
         <div className="sidebar-bottom">
           <div className="help-card"><div className="help-icon"><Command size={17} /></div><strong>Need a hand?</strong><p>Your store tools, all in one place.</p></div>
           <button className="user-menu" onClick={() => logout.mutate()} title="Sign out">
@@ -2602,6 +2630,26 @@ function PosEntryPage({ user }: { user: User }) {
   );
 }
 
+function PosSignOutConfirmation({
+  unfinishedItemCount, onConfirm, onCancel,
+}: { unfinishedItemCount: number; onConfirm: () => void; onCancel: () => void }) {
+  return (
+    <div className="pos-confirm-screen" role="dialog" aria-modal="true">
+      <section className="pos-confirm-card">
+        <span className="pos-confirm-eyebrow">POS SESSION</span>
+        <h2>Sign out of POS?</h2>
+        {unfinishedItemCount > 0
+          ? <p>Your unfinished sale has {unfinishedItemCount} item(s). It will be cleared when you sign out.</p>
+          : <p>This will end your POS session and return you to your authorized workspace.</p>}
+        <div className="pos-confirm-actions">
+          <button className="confirm" onClick={onConfirm}>Confirm sign out</button>
+          <button className="cancel" onClick={onCancel}>Continue POS</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: number; name: string; username: string }; onLogout: () => void }) {
   const queryClient = useQueryClient();
   const canSell = user.roles.some((role) => ["admin", "manager", "cashier"].includes(role));
@@ -3038,9 +3086,17 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       <section className="pos-close-screen">
         <header className="pos-dedicated-header">
           <div className="pos-header-brand"><strong>Smart POS</strong><span>{activeShift.data?.branchName ?? `Branch ${user.branchId}`}</span></div>
+          <WorkspaceNavigation user={user} className="pos-workspace-nav" linkClassName="pos-workspace-nav-link" />
           <div className="pos-header-cashier"><span>Cashier</span><strong>{cashier.username}</strong></div>
+          <div className="pos-header-shift"><span>Shift</span><strong className={activeShift.data ? "open" : "closed"}>{activeShift.data ? "OPEN" : "CLOSED"}</strong></div>
           <button className="pos-header-action" onClick={() => setShiftCloseOpen(false)}>Back to POS</button>
+          <button className="pos-header-signout" onClick={() => setSignOutConfirmOpen(true)}>Sign Out</button>
         </header>
+        {signOutConfirmOpen && <PosSignOutConfirmation
+          unfinishedItemCount={cart.reduce((sum, item) => sum + item.quantity, 0)}
+          onConfirm={onLogout}
+          onCancel={() => setSignOutConfirmOpen(false)}
+        />}
         <main className="pos-close-content">
           <div className="pos-close-title"><span>SHIFT CHANGE</span><h1>Close cashier shift</h1><p>{cashier.name} · {activeShift.data ? `Shift opened ${new Date(activeShift.data.openedAt).toLocaleString("en-KE")}` : "No active shift"}</p></div>
           {shiftSummary.isPending ? <div className="pos-close-loading">Loading shift totals…</div> : shiftSummary.data ? (
@@ -3087,27 +3143,18 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     <section className="pos-page pos-desktop">
       <header className="pos-dedicated-header">
         <div className="pos-header-brand"><strong>Smart POS</strong><span>{activeShift.data?.branchName ?? `Branch ${user.branchId}`}</span></div>
+        <WorkspaceNavigation user={user} className="pos-workspace-nav" linkClassName="pos-workspace-nav-link" />
         <div className="pos-header-cashier"><span>Cashier</span><strong>{cashier.username}</strong></div>
         <div className="pos-header-time"><span>{new Date().toLocaleDateString("en-KE", { weekday: "short", year: "numeric", month: "short", day: "2-digit" })}</span><strong>{new Date().toLocaleTimeString("en-KE", { hour: "2-digit", minute: "2-digit" })}</strong></div>
         <div className="pos-header-shift"><span>Shift</span><strong className={activeShift.data ? "open" : "closed"}>{activeShift.data ? "OPEN" : "CLOSED"}</strong></div>
         <button className="pos-header-action" onClick={() => setShiftCloseOpen(true)}>Shift Change</button>
         <button className="pos-header-signout" onClick={() => setSignOutConfirmOpen(true)}>Sign Out</button>
       </header>
-      {signOutConfirmOpen && (
-        <div className="pos-confirm-screen" role="dialog" aria-modal="true">
-          <section className="pos-confirm-card">
-            <span className="pos-confirm-eyebrow">POS SESSION</span>
-            <h2>Sign out of POS?</h2>
-            {cart.length > 0
-              ? <p>Your unfinished sale has {cart.reduce((sum, item) => sum + item.quantity, 0)} item(s). It will be cleared when you sign out.</p>
-              : <p>This will end your dedicated POS session and return you to the main dashboard.</p>}
-            <div className="pos-confirm-actions">
-              <button className="confirm" onClick={() => onLogout()}>Confirm sign out</button>
-              <button className="cancel" onClick={() => setSignOutConfirmOpen(false)}>Continue POS</button>
-            </div>
-          </section>
-        </div>
-      )}
+      {signOutConfirmOpen && <PosSignOutConfirmation
+        unfinishedItemCount={cart.reduce((sum, item) => sum + item.quantity, 0)}
+        onConfirm={onLogout}
+        onCancel={() => setSignOutConfirmOpen(false)}
+      />}
       {toast && <div role="status" className="success-banner"><ShieldCheck size={17} /> {toast}<button onClick={() => setToast("")} aria-label="Dismiss"><X size={15} /></button></div>}
       {checkoutError && <ErrorBanner message={checkoutError} onRetry={() => setCheckoutError("")} />}
       {activeShift.isError && <ErrorBanner message={getErrorMessage(activeShift.error)} onRetry={() => void activeShift.refetch()} />}
