@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AuthUser } from "./auth.js";
-import { canAssignStaffRole, createStaffSchema, staffStatusSchema } from "./staff.js";
+import { canAssignStaffRole, createStaffSchema, resetStaffPasswordSchema, staffStatusSchema } from "./staff.js";
 
 const actor = (roles: string[]): AuthUser => ({
   id: 1,
@@ -29,15 +29,29 @@ describe("staff management validation", () => {
     expect(result.hiredAt).toBe("2026-01-15");
   });
 
-  it("rejects short passwords and invalid roles", () => {
+  it("accepts four-character passwords and rejects shorter ones", () => {
     const input = {
       name: "Alex Staff",
       email: "staff@example.com",
-      password: "short",
+      username: "alex.staff",
+      password: "abcd",
       role: "cashier",
     };
+    expect(createStaffSchema.safeParse(input).success).toBe(true);
+    expect(createStaffSchema.safeParse({ ...input, password: "abc" }).success).toBe(false);
+    expect(resetStaffPasswordSchema.safeParse({ password: "abcd" }).success).toBe(true);
+    expect(resetStaffPasswordSchema.safeParse({ password: "abc" }).success).toBe(false);
+  });
+
+  it("rejects invalid roles", () => {
+    const input = {
+      name: "Alex Staff",
+      email: "staff@example.com",
+      username: "alex.staff",
+      password: "abcd",
+      role: "root",
+    };
     expect(createStaffSchema.safeParse(input).success).toBe(false);
-    expect(createStaffSchema.safeParse({ ...input, password: "long-enough-password", role: "root" }).success).toBe(false);
   });
 
   it("allows only administrators to create accounts and assign roles", () => {

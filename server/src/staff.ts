@@ -22,7 +22,7 @@ export const createStaffSchema = z.object({
   name: z.string().trim().min(2).max(150),
   email: z.email().max(254),
   username: z.string().trim().min(4).max(100).regex(/^[A-Za-z0-9._-]+$/),
-  password: z.string().min(12).max(200),
+  password: z.string().min(4).max(200),
   role: z.enum(staffRoles),
   branchId: z.number().int().positive().optional(),
   isActive: z.boolean().optional(),
@@ -45,7 +45,7 @@ export const updateStaffSchema = createStaffSchema.omit({ password: true, mustCh
   modulePermissions: createStaffSchema.shape.modulePermissions,
 }).strict();
 export const resetStaffPasswordSchema = z.object({
-  password: z.string().min(12).max(200),
+  password: z.string().min(4).max(200),
 }).strict();
 export const modulePermissionsSchema = z.array(z.object({
   moduleId: z.string().min(1).max(40),

@@ -18,8 +18,8 @@ const products = [
 async function seed(): Promise<void> {
   const email = process.env.SEED_ADMIN_EMAIL?.trim().toLowerCase();
   const password = process.env.SEED_ADMIN_PASSWORD;
-  if (!email || !password || password === "replace-before-seeding" || password.length < 12) {
-    throw new Error("Set SEED_ADMIN_EMAIL and a unique SEED_ADMIN_PASSWORD of at least 12 characters before seeding.");
+  if (!email || !password || password === "replace-before-seeding" || password.length < 4) {
+    throw new Error("Set SEED_ADMIN_EMAIL and a unique SEED_ADMIN_PASSWORD of at least 4 characters before seeding.");
   }
   const connection = await pool.getConnection();
   try {

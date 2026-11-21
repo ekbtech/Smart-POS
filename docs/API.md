@@ -129,7 +129,7 @@ Checkout locks and consumes unexpired inventory lots in earliest-expiry order. P
 }
 ```
 
-Passwords must be at least 12 characters and are hashed before storage. Managers can create staff accounts for operational roles but cannot grant admin or manager privileges. Admins can create any role. Deactivating a user revokes their active sessions; the branch cannot be left without an active administrator, and admins cannot deactivate their own account.
+Passwords must be at least 4 characters and are hashed before storage. Managers can create staff accounts for operational roles but cannot grant admin or manager privileges. Admins can create any role. Deactivating a user revokes their active sessions; the branch cannot be left without an active administrator, and admins cannot deactivate their own account.
 
 ```json
 { "isActive": false }

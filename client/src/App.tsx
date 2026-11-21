@@ -154,7 +154,7 @@ function ChangePasswordPage() {
   const [error, setError] = useState("");
   const schema = z.object({
     currentPassword: z.string().min(1, "Enter your current password."),
-    newPassword: z.string().min(12, "Use at least 12 characters.").max(200),
+    newPassword: z.string().min(4, "Use at least 4 characters.").max(200),
     confirmPassword: z.string().min(1, "Confirm your new password."),
   }).refine((values) => values.newPassword === values.confirmPassword, {
     path: ["confirmPassword"], message: "Passwords do not match.",
@@ -1823,7 +1823,7 @@ function StaffPage({ user }: { user: User }) {
         <label>Full name<input required minLength={2} maxLength={150} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label>
         <label>Work email<input type="email" required maxLength={254} value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label>
         <label>Username<input required minLength={4} maxLength={100} pattern="[A-Za-z0-9._-]+" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} /></label>
-        {!editingId && <label>Temporary password<input type="password" autoComplete="new-password" minLength={12} maxLength={200} required value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /><small>At least 12 characters. The employee must change it after signing in.</small></label>}
+        {!editingId && <label>Temporary password<input type="password" autoComplete="new-password" minLength={4} maxLength={200} required value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /><small>At least 4 characters. The employee must change it after signing in.</small></label>}
         <label>Role<select value={form.role} onChange={(event) => setForm({ ...form, role: event.target.value, defaultLanding: "" })}>{roles.data?.map((role) => <option key={role.name} value={role.name}>{role.name.replaceAll("_", " ")}</option>)}</select></label>
         <label>Branch<select value={form.branchId} onChange={(event) => setForm({ ...form, branchId: event.target.value })}>{branches.data?.map((branch) => <option key={branch.id} value={branch.id}>{branch.name} ({branch.code})</option>)}</select></label>
         <label>Department<select value={form.departmentId} onChange={(event) => setForm({ ...form, departmentId: event.target.value })}><option value="">Unassigned</option>{departments.data?.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</select></label>
@@ -1876,7 +1876,7 @@ function StaffPage({ user }: { user: User }) {
         </tr>)}
       </tbody></table>{!staff.data?.length && <EmptyState title="No team members found" detail="Create staff accounts for this branch or refine your search." />}</div>}
       {resetId !== null && <form className="staff-reset-form" onSubmit={(event) => { event.preventDefault(); setError(""); reset.mutate(); }}>
-        <strong>Set a temporary password</strong><input type="password" minLength={12} maxLength={200} required autoComplete="new-password" value={resetPassword} onChange={(event) => setResetPassword(event.target.value)} placeholder="At least 12 characters" />
+        <strong>Set a temporary password</strong><input type="password" minLength={4} maxLength={200} required autoComplete="new-password" value={resetPassword} onChange={(event) => setResetPassword(event.target.value)} placeholder="At least 4 characters" />
         <button className="small-action" disabled={reset.isPending}>{reset.isPending ? "Resetting…" : "Reset and require change"}</button>
       </form>}
       {activityId !== null && <div className="staff-activity-panel">
