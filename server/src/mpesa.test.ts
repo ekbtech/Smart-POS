@@ -37,6 +37,11 @@ describe("M-Pesa payment validation", () => {
     vi.stubEnv("MPESA_CALLBACK_URL", "http://localhost/api/mpesa/callback");
     expect(getMpesaAvailability().configured).toBe(false);
 
+    vi.stubEnv("MPESA_CALLBACK_URL", "https://192.168.1.20/api/mpesa/callback");
+    expect(getMpesaAvailability().configured).toBe(false);
+    vi.stubEnv("MPESA_CALLBACK_URL", "https://api.local/api/mpesa/callback");
+    expect(getMpesaAvailability().configured).toBe(false);
+
     vi.stubEnv("MPESA_CALLBACK_URL", "https://api.example.com/api/mpesa/callback");
     expect(getMpesaAvailability()).toEqual({
       configured: true,

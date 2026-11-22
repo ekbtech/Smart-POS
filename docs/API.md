@@ -269,6 +269,7 @@ Expense payment method is descriptive bookkeeping only; this endpoint does not i
 
 - `GET /sales?q=...&from=YYYY-MM-DD&to=YYYY-MM-DD` — up to 100 recent branch receipts, filterable by receipt number, transaction ID, cashier name, and date range.
 - `GET /sales/:id` — branch-scoped receipt, item, totals, cashier, payment, and tender details.
+- `GET /pos/sales/:id/receipt` — POS-only receipt lookup restricted to the authenticated cashier's own sale; used immediately after checkout for cashier roles without Sales-module access.
 - `GET /sales/held` — held sales for the authenticated cashier.
 - `POST /sales/held` — hold the current cart for later retrieval.
 - `POST /sales/held/:id/retrieve` — retrieve and remove a cashier's held sale.

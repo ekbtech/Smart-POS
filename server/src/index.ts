@@ -1275,64 +1275,85 @@ app.post("/api/mpesa/callback", mpesaCallbackLimiter, (req, res, next) => {
   );
 });
 
+async function loadSaleReceipt(id: number, branchId: number, cashierId?: number) {
+  const cashierCondition = cashierId === undefined ? "" : " AND s.cashier_id = ?";
+  const saleParameters: Array<number> = [id, branchId];
+  if (cashierId !== undefined) saleParameters.push(cashierId);
+  const [sales, items, payments] = await Promise.all([
+    query<Array<{
+      id: number; receipt_number: string; subtotal: string; discount: string; tax: string;
+      total: string; status: string; created_at: Date; cashier: string; customer_name: string | null;
+      branch_name: string; cash_received: string | null; change_due: string;
+    } & import("mysql2").RowDataPacket>>(
+      `SELECT s.id, s.receipt_number, s.subtotal, s.discount, s.tax, s.total, s.status, s.created_at,
+              s.cash_received, s.change_due, u.name AS cashier, c.name AS customer_name, b.name AS branch_name
+       FROM sales s JOIN users u ON u.id = s.cashier_id JOIN branches b ON b.id = s.branch_id
+       LEFT JOIN customers c ON c.id = s.customer_id
+       WHERE s.id = ? AND s.branch_id = ?${cashierCondition} LIMIT 1`,
+      saleParameters,
+    ),
+    query<Array<{
+      id: number; product_id: number; sku_snapshot: string; name_snapshot: string; quantity: string;
+      unit_price: string; tax_rate: string; line_total: string; refunded: string;
+    } & import("mysql2").RowDataPacket>>(
+      `SELECT si.id, si.product_id, si.sku_snapshot, si.name_snapshot, si.quantity, si.unit_price, si.tax_rate, si.line_total,
+              COALESCE((SELECT SUM(ri.quantity) FROM refund_items ri WHERE ri.sale_item_id = si.id), 0) AS refunded
+       FROM sale_items si WHERE si.sale_id = ? ORDER BY si.id`,
+      [id],
+    ),
+    query<Array<{
+      method: string; amount: string; status: string; provider_reference: string | null;
+    } & import("mysql2").RowDataPacket>>(
+      "SELECT method, amount, status, provider_reference FROM sale_payments WHERE sale_id = ? ORDER BY id",
+      [id],
+    ),
+  ]);
+  if (!sales[0]) return null;
+  return {
+    sale: {
+      id: sales[0].id, receiptNumber: sales[0].receipt_number, subtotal: sales[0].subtotal,
+      discount: sales[0].discount, tax: sales[0].tax, total: sales[0].total,
+      status: sales[0].status, createdAt: sales[0].created_at.toISOString(),
+      cashier: sales[0].cashier, customer: sales[0].customer_name, branch: sales[0].branch_name,
+      cashReceived: sales[0].cash_received, changeDue: sales[0].change_due,
+    },
+    business: {
+      name: process.env.RECEIPT_BUSINESS_NAME?.trim() || "Checonex",
+      phone: process.env.RECEIPT_BUSINESS_PHONE?.trim() || "0723037557",
+      address: process.env.RECEIPT_BUSINESS_ADDRESS?.trim() || "Eldama Ravine / Kabarnet",
+      logoUrl: process.env.RECEIPT_LOGO_URL?.trim() || null,
+    },
+    items: items.map((item) => ({
+      id: item.id, productId: item.product_id, sku: item.sku_snapshot, name: item.name_snapshot,
+      quantity: item.quantity, refunded: item.refunded, unitPrice: item.unit_price,
+      taxRate: item.tax_rate, lineTotal: item.line_total,
+    })),
+    payments: payments.map((payment) => ({
+      method: payment.method, amount: payment.amount, status: payment.status,
+      reference: payment.provider_reference,
+    })),
+  };
+}
+
+app.get("/api/pos/sales/:id/receipt", authenticate, authenticatePos, requireModule("pos"), requireRoles("admin", "manager", "cashier"), async (req, res, next) => {
+  const id = positiveId(req.params.id ?? "");
+  if (!id) { res.status(400).json({ error: "Invalid sale ID." }); return; }
+  try {
+    const receipt = await loadSaleReceipt(id, req.user!.branchId, req.user!.id);
+    if (!receipt) { res.status(404).json({ error: "Sale not found." }); return; }
+    res.json(receipt);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/sales/:id", authenticate, requireModule("sales"), async (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid sale ID." }); return; }
   try {
-    const [sales, items, payments] = await Promise.all([
-      query<Array<{
-        id: number; receipt_number: string; subtotal: string; discount: string; tax: string;
-        total: string; status: string; created_at: Date; cashier: string; customer_name: string | null;
-        branch_name: string; cash_received: string | null; change_due: string;
-      } & import("mysql2").RowDataPacket>>(
-        `SELECT s.id, s.receipt_number, s.subtotal, s.discount, s.tax, s.total, s.status, s.created_at,
-                s.cash_received, s.change_due, u.name AS cashier, c.name AS customer_name, b.name AS branch_name
-         FROM sales s JOIN users u ON u.id = s.cashier_id JOIN branches b ON b.id = s.branch_id
-         LEFT JOIN customers c ON c.id = s.customer_id
-         WHERE s.id = ? AND s.branch_id = ? LIMIT 1`,
-        [id, req.user!.branchId],
-      ),
-      query<Array<{
-        id: number; product_id: number; sku_snapshot: string; name_snapshot: string; quantity: string;
-        unit_price: string; tax_rate: string; line_total: string; refunded: string;
-      } & import("mysql2").RowDataPacket>>(
-        `SELECT si.id, si.product_id, si.sku_snapshot, si.name_snapshot, si.quantity, si.unit_price, si.tax_rate, si.line_total,
-                COALESCE((SELECT SUM(ri.quantity) FROM refund_items ri WHERE ri.sale_item_id = si.id), 0) AS refunded
-         FROM sale_items si WHERE si.sale_id = ? ORDER BY si.id`,
-        [id],
-      ),
-      query<Array<{
-        method: string; amount: string; status: string; provider_reference: string | null;
-      } & import("mysql2").RowDataPacket>>(
-        "SELECT method, amount, status, provider_reference FROM sale_payments WHERE sale_id = ? ORDER BY id",
-        [id],
-      ),
-    ]);
-    if (!sales[0]) { res.status(404).json({ error: "Sale not found." }); return; }
-    res.json({
-      sale: {
-        id: sales[0].id, receiptNumber: sales[0].receipt_number, subtotal: sales[0].subtotal,
-        discount: sales[0].discount, tax: sales[0].tax, total: sales[0].total,
-        status: sales[0].status, createdAt: sales[0].created_at.toISOString(),
-        cashier: sales[0].cashier, customer: sales[0].customer_name, branch: sales[0].branch_name,
-        cashReceived: sales[0].cash_received, changeDue: sales[0].change_due,
-      },
-      business: {
-        name: process.env.RECEIPT_BUSINESS_NAME?.trim() || "Checonex",
-        phone: process.env.RECEIPT_BUSINESS_PHONE?.trim() || "0723037557",
-        address: process.env.RECEIPT_BUSINESS_ADDRESS?.trim() || "Eldama Ravine / Kabarnet",
-        logoUrl: process.env.RECEIPT_LOGO_URL?.trim() || null,
-      },
-      items: items.map((item) => ({
-        id: item.id, productId: item.product_id, sku: item.sku_snapshot, name: item.name_snapshot,
-        quantity: item.quantity, refunded: item.refunded, unitPrice: item.unit_price,
-        taxRate: item.tax_rate, lineTotal: item.line_total,
-      })),
-      payments: payments.map((payment) => ({
-        method: payment.method, amount: payment.amount, status: payment.status,
-        reference: payment.provider_reference,
-      })),
-    });
+    const receipt = await loadSaleReceipt(id, req.user!.branchId);
+    if (!receipt) { res.status(404).json({ error: "Sale not found." }); return; }
+    res.json(receipt);
   } catch (error) {
     next(error);
   }

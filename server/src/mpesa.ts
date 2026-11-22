@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
 import { Decimal } from "decimal.js";
 import { z } from "zod";
 import type { RowDataPacket } from "mysql2/promise";
@@ -114,11 +115,14 @@ function getMpesaConfig(): MpesaConfig | null {
   } catch {
     return null;
   }
+  const callbackHost = callback.hostname.replace(/^\[|\]$/g, "").toLowerCase();
   if (
     callback.protocol !== "https:"
     || callback.username
     || callback.password
-    || ["localhost", "127.0.0.1", "::1"].includes(callback.hostname)
+    || isIP(callbackHost) !== 0
+    || ["localhost", "local", "internal", "lan"].some((suffix) =>
+      callbackHost === suffix || callbackHost.endsWith(`.${suffix}`))
     || !callback.pathname.endsWith("/api/mpesa/callback")
   ) return null;
 
@@ -241,17 +245,23 @@ async function requestStkPush(
     throw new MpesaRequestError("Daraja returned an invalid STK Push response. Check payment status before retrying.", false);
   }
   const responseBody = payload as Record<string, unknown>;
-  if (
-    String(responseBody.ResponseCode ?? "") !== "0"
-    || typeof responseBody.CheckoutRequestID !== "string"
-    || typeof responseBody.MerchantRequestID !== "string"
-  ) {
+  if (String(responseBody.ResponseCode ?? "") !== "0") {
     throw new MpesaRequestError(
       typeof responseBody.ResponseDescription === "string"
         ? responseBody.ResponseDescription.slice(0, 255)
         : "Daraja did not accept the STK Push request.",
       true,
     );
+  }
+  if (
+    typeof responseBody.CheckoutRequestID !== "string"
+    || !responseBody.CheckoutRequestID
+    || responseBody.CheckoutRequestID.length > 100
+    || typeof responseBody.MerchantRequestID !== "string"
+    || !responseBody.MerchantRequestID
+    || responseBody.MerchantRequestID.length > 100
+  ) {
+    throw new MpesaRequestError("Daraja accepted the request without usable identifiers. Check payment status before retrying.", false);
   }
   return {
     checkoutRequestId: responseBody.CheckoutRequestID,
@@ -596,7 +606,12 @@ async function processMpesaCallback(checkoutRequestId: string) {
       String(verification.CheckoutRequestID ?? "") !== checkoutRequestId
       || String(verification.MerchantRequestID ?? "") !== intent.merchant_request_id
     ) throw new Error("Daraja verification identifiers do not match the request.");
-    const resultCode = Number(verification.ResultCode);
+    const rawResultCode = verification.ResultCode;
+    if (
+      (typeof rawResultCode !== "number" && (typeof rawResultCode !== "string" || !/^\d{1,5}$/.test(rawResultCode)))
+      || !Number.isInteger(Number(rawResultCode))
+    ) throw new Error("Daraja did not return a definitive payment result.");
+    const resultCode = Number(rawResultCode);
     if (resultCode !== 0) {
       await releaseReservation(
         intent.id,
@@ -637,6 +652,7 @@ async function processMpesaCallback(checkoutRequestId: string) {
       || !receiptCode
       || receiptCode.length > 32
       || !callbackAmountMatches
+      || (intent.mpesa_receipt_number !== null && intent.mpesa_receipt_number !== receiptCode)
     ) {
       await pool.execute(
         `UPDATE mpesa_payment_requests SET status = 'verifying', last_checked_at = NOW(),
@@ -645,6 +661,29 @@ async function processMpesaCallback(checkoutRequestId: string) {
         [intent.id],
       );
       return;
+    }
+
+    try {
+      const [claimedReceipt] = await pool.execute(
+        `UPDATE mpesa_payment_requests SET mpesa_receipt_number = ?
+         WHERE id = ? AND status = 'verifying'
+           AND (mpesa_receipt_number IS NULL OR mpesa_receipt_number = ?)`,
+        [receiptCode, intent.id, receiptCode],
+      );
+      if ((claimedReceipt as { affectedRows: number }).affectedRows !== 1) {
+        const [receiptRows] = await pool.execute<Array<RowDataPacket & { mpesa_receipt_number: string | null }>>(
+          "SELECT mpesa_receipt_number FROM mpesa_payment_requests WHERE id = ?",
+          [intent.id],
+        );
+        if (receiptRows[0]?.mpesa_receipt_number !== receiptCode) {
+          throw new Error("The M-Pesa transaction code could not be reserved for this request.");
+        }
+      }
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ER_DUP_ENTRY") {
+        throw new Error("This M-Pesa transaction code is already assigned to another payment.");
+      }
+      throw error;
     }
 
     const saleInput = parseJson<PaymentIntentInput>(intent.sale_input);

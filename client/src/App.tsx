@@ -2926,7 +2926,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       void queryClient.invalidateQueries({ queryKey: ["products"] });
       void queryClient.invalidateQueries({ queryKey: ["sales"] });
       try {
-        const { data } = await api.get<SaleReceipt>(`/sales/${sale.id}`);
+        const { data } = await api.get<SaleReceipt>(`/pos/sales/${sale.id}/receipt`);
         setReceipt(data);
       } catch (error) {
         setCheckoutError(`Sale ${sale.receiptNumber} completed, but its receipt could not be loaded: ${getErrorMessage(error)}`);
@@ -2976,7 +2976,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   });
   const loadMpesaReceipt = async (saleId: number) => {
     try {
-      const { data } = await api.get<SaleReceipt>(`/sales/${saleId}`);
+      const { data } = await api.get<SaleReceipt>(`/pos/sales/${saleId}/receipt`);
       setReceipt(data);
       setToast(`Sale ${data.sale.receiptNumber} completed · ${money(data.sale.total)}`);
       setCart([]);
@@ -3207,6 +3207,8 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   };
   const amountPaidCents = Math.round((Number(amountPaid) || 0) * 100);
   const cashAllocationCents = Math.round((Number(cashAllocation) || 0) * 100);
+  const validCashTender = /^\d{1,10}(?:\.\d{1,2})?$/.test(amountPaid.trim());
+  const validCashAllocation = /^\d{1,10}(?:\.\d{1,2})?$/.test(cashAllocation.trim());
   const bankAllocationCents = paymentMethod === "split" ? payableCents - cashAllocationCents : payableCents;
   const balanceCents = Math.max(0, payableCents - amountPaidCents);
   const changeCents = Math.max(0, amountPaidCents - payableCents);
@@ -3215,9 +3217,10 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const bankTransferApprovedForAmount = bankVerification?.status === "verified"
     && bankVerification.amount === fromCents(bankAllocationCents);
   const canCompletePayment = paymentMethod === "cash"
-    ? Boolean(amountPaid.trim()) && amountPaidCents >= payableCents
+    ? validCashTender && amountPaidCents >= payableCents
     : paymentMethod === "split"
-      ? cashAllocationCents > 0 && bankAllocationCents > 0
+      ? validCashAllocation && validCashTender
+        && cashAllocationCents > 0 && bankAllocationCents > 0
         && amountPaidCents >= cashAllocationCents
         && Boolean(bankReference.trim())
         && bankTransferApprovedForAmount
