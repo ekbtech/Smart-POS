@@ -384,18 +384,50 @@ function DashboardPage({ user }: { user: User }) {
     queryFn: async () => (await api.get<{ summary: DashboardSummary }>("/dashboard/summary")).data.summary,
   });
   const data = summary.data;
+  const isAdmin = user.roles.some((role) => ["admin", "manager"].includes(role));
   return (
-    <section className="page-content">
+    <section className={`page-content dashboard-page${isAdmin ? " admin-overview" : ""}`}>
       <div className="page-heading">
-        <div><div className="eyebrow"><span className="eyebrow-dot" /> {greeting.toUpperCase()}</div><h1>{timeGreeting}, {user.name.split(" ")[0]}<span className="heading-period">.</span></h1><p>Here’s what’s happening across your store today.</p></div>
-        <Link to="/pos" className="button button-dark"><ShoppingCart size={17} /> Start a sale <ArrowUpRight size={16} /></Link>
+        <div>
+          <div className="eyebrow"><span className="eyebrow-dot" /> {greeting.toUpperCase()}</div>
+          <h1>{timeGreeting}, {user.name.split(" ")[0]}<span className="heading-period">.</span></h1>
+          <p>{isAdmin ? "Monitor store performance and operational priorities." : "Here’s what’s happening across your store today."}</p>
+        </div>
+        <div className="dashboard-heading-actions">
+          <button className="dashboard-refresh" type="button" onClick={() => void summary.refetch()} disabled={summary.isFetching} aria-label="Refresh dashboard">
+            <RefreshCw size={15} className={summary.isFetching ? "dashboard-refreshing" : ""} />
+            <span>{summary.isFetching ? "Refreshing" : "Refresh"}</span>
+          </button>
+          <Link to="/pos" className="button button-dark"><ShoppingCart size={17} /> Start a sale <ArrowUpRight size={16} /></Link>
+        </div>
       </div>
       {summary.isError && <ErrorBanner message={getErrorMessage(summary.error)} onRetry={() => void summary.refetch()} />}
+      {isAdmin && (
+        <div className="admin-operations-strip">
+          <div className="admin-operation-status">
+            <span className="status-dot" />
+            <div><strong>Operations are live</strong><small>Dashboard synced with completed store activity</small></div>
+          </div>
+          <div className="admin-quick-actions" aria-label="Quick actions">
+            {user.modules?.includes("pos") && <Link to="/pos"><ShoppingCart size={16} /><span>Open POS</span></Link>}
+            {user.modules?.includes("products") && <Link to="/products"><PackagePlus size={16} /><span>Add product</span></Link>}
+            {user.modules?.includes("inventory") && <Link to="/inventory"><Boxes size={16} /><span>Stock view</span></Link>}
+            {user.modules?.includes("reports") && <Link to="/reports"><TrendingUp size={16} /><span>Reports</span></Link>}
+          </div>
+        </div>
+      )}
       <div className="metric-grid">
         <MetricCard label="TODAY'S SALES" value={data ? money(data.todaySales) : "—"} caption={`${data?.todayTransactions ?? 0} completed transactions`} icon={<CircleDollarSign size={19} />} tone="green" loading={summary.isPending} />
         <MetricCard label="ACTIVE PRODUCTS" value={data ? String(data.productCount).padStart(2, "0") : "—"} caption="Across your product catalogue" icon={<Boxes size={19} />} loading={summary.isPending} />
         <MetricCard label="NEEDS ATTENTION" value={data ? String(data.lowStockCount).padStart(2, "0") : "—"} caption="Products at or below reorder level" icon={<ArrowDownLeft size={19} />} tone="amber" loading={summary.isPending} />
-        <div className="metric-card trend-card"><div className="metric-top"><span>YOUR WORKSPACE</span><TrendingUp size={18} /></div><div className="trend-value">In good order<span>.</span></div><div className="metric-caption"><span className="trend-indicator" /> Connected to live store data</div><div className="mini-bars" aria-hidden="true">{[31, 47, 38, 60, 49, 74, 56, 83, 67, 93, 72, 100].map((height, i) => <i key={i} style={{ height: `${height}%` }} />)}</div></div>
+        <div className="metric-card trend-card">
+          <div className="metric-top"><span>AVERAGE SALE</span><TrendingUp size={18} /></div>
+          <div className={`trend-value ${summary.isPending ? "skeleton" : ""}`}>
+            {summary.isPending ? " " : data && data.todayTransactions > 0 ? money(Number(data.todaySales) / data.todayTransactions) : "Ksh 0.00"}
+          </div>
+          <div className="metric-caption"><span className="trend-indicator" /> Per completed transaction</div>
+          <div className="mini-bars" aria-hidden="true">{[31, 47, 38, 60, 49, 74, 56, 83, 67, 93, 72, 100].map((height, i) => <i key={i} style={{ height: `${height}%` }} />)}</div>
+        </div>
       </div>
       <div className="dashboard-columns">
         <section className="panel sales-panel">
