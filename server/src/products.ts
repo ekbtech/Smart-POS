@@ -40,6 +40,7 @@ export const updateProductSchema = z.object({
   taxRate: z.string().regex(decimal(3, 2)).refine((value) => Number(value) <= 100).optional(),
   reorderLevel: productQuantity.optional(),
   isActive: z.boolean().optional(),
+  priceChangeReason: z.string().trim().min(2).max(500).optional(),
 }).strict().refine((value) => Object.keys(value).length > 0, "Provide at least one product field to update.");
 
 export async function registerProduct(input: NewProduct, user: AuthUser) {
@@ -100,8 +101,10 @@ export async function registerProduct(input: NewProduct, user: AuthUser) {
 export async function updateProduct(id: number, input: z.infer<typeof updateProductSchema>, user: AuthUser) {
   try {
     return await withTransaction(async (connection) => {
-      const [products] = await connection.execute<Array<{ id: number; is_active: number } & import("mysql2").RowDataPacket>>(
-        "SELECT id, is_active FROM products WHERE id = ? FOR UPDATE",
+      const [products] = await connection.execute<Array<{
+        id: number; is_active: number; purchase_price: string | null; selling_price: string;
+      } & import("mysql2").RowDataPacket>>(
+        "SELECT id, is_active, purchase_price, selling_price FROM products WHERE id = ? FOR UPDATE",
         [id],
       );
       if (!products[0]) throw new HttpError(404, "Product not found.");
@@ -150,6 +153,22 @@ export async function updateProduct(id: number, input: z.infer<typeof updateProd
       if (categoryId !== undefined) {
         sets.push("category_id = ?");
         values.push(categoryId);
+      }
+      const priceChanged = (input.sellingPrice !== undefined && input.sellingPrice !== products[0].selling_price)
+        || (input.purchasePrice !== undefined && (input.purchasePrice ?? null) !== (products[0].purchase_price ?? null));
+      if (priceChanged) {
+        await connection.execute(
+          `INSERT INTO product_price_history
+             (product_id, branch_id, changed_by, previous_buying_price, new_buying_price,
+              previous_selling_price, new_selling_price, reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            id, user.branchId, user.id,
+            products[0].purchase_price, input.purchasePrice ?? products[0].purchase_price,
+            products[0].selling_price, input.sellingPrice ?? products[0].selling_price,
+            input.priceChangeReason ?? "Product price updated",
+          ],
+        );
       }
       if (sets.length) {
         await connection.execute(`UPDATE products SET ${sets.join(", ")} WHERE id = ?`, [...values, id]);

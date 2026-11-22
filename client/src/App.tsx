@@ -17,6 +17,7 @@ import {
   api, getErrorMessage, type BranchReport, type DashboardSummary, type Product, type User,
 } from "./api";
 import { createUuid } from "./uuid";
+import { listOfflineSales, removeOfflineSale, saveOfflineSale, updateOfflineSale, type OfflineSaleRecord } from "./offline";
 
 const ReportsCharts = lazy(() => import("./ReportsCharts"));
 
@@ -111,6 +112,13 @@ const workspaceNavigationItems = [
   { module: "expenses", route: "/expenses", label: "Expenses", icon: <ReceiptText size={18} aria-hidden="true" /> },
   { module: "reports", route: "/reports", label: "Reports", icon: <TrendingUp size={18} aria-hidden="true" /> },
   { module: "sales", route: "/sales", label: "Sales & returns", icon: <RotateCcw size={18} aria-hidden="true" /> },
+  { module: "branches", route: "/branches", label: "Branches", icon: <Users size={18} aria-hidden="true" /> },
+  { module: "sync_monitor", route: "/sync-monitor", label: "Offline sync", icon: <RefreshCw size={18} aria-hidden="true" /> },
+  { module: "backups", route: "/backups", label: "Backups", icon: <ShieldCheck size={18} aria-hidden="true" /> },
+  { module: "price_history", route: "/price-history", label: "Price history", icon: <ReceiptText size={18} aria-hidden="true" /> },
+  { module: "notifications", route: "/notifications", label: "Notifications", icon: <Smartphone size={18} aria-hidden="true" /> },
+  { module: "receipts", route: "/receipts", label: "E-receipts", icon: <ReceiptText size={18} aria-hidden="true" /> },
+  { module: "comparisons", route: "/comparisons", label: "Comparisons", icon: <TrendingUp size={18} aria-hidden="true" /> },
 ] as const;
 
 function WorkspaceNavigation({
@@ -194,6 +202,13 @@ function AuthenticatedApp() {
         <Route path="/expenses" element={<PermissionRoute module="expenses" user={me.data}><ExpensesPage user={me.data} /></PermissionRoute>} />
         <Route path="/reports" element={<PermissionRoute module="reports" user={me.data}><ReportsPage user={me.data} /></PermissionRoute>} />
         <Route path="/sales" element={<PermissionRoute module="sales" user={me.data}><SalesPage user={me.data} /></PermissionRoute>} />
+        <Route path="/branches" element={<PermissionRoute module="branches" user={me.data}><BranchesPage /></PermissionRoute>} />
+        <Route path="/sync-monitor" element={<PermissionRoute module="sync_monitor" user={me.data}><OfflineSyncPage /></PermissionRoute>} />
+        <Route path="/backups" element={<PermissionRoute module="backups" user={me.data}><BackupsPage /></PermissionRoute>} />
+        <Route path="/price-history" element={<PermissionRoute module="price_history" user={me.data}><PriceHistoryPage /></PermissionRoute>} />
+        <Route path="/notifications" element={<PermissionRoute module="notifications" user={me.data}><NotificationsPage /></PermissionRoute>} />
+        <Route path="/receipts" element={<PermissionRoute module="receipts" user={me.data}><ElectronicReceiptsPage /></PermissionRoute>} />
+        <Route path="/comparisons" element={<PermissionRoute module="comparisons" user={me.data}><ComparisonsPage /></PermissionRoute>} />
         <Route path="/access-denied" element={<AccessDeniedPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
@@ -2367,6 +2382,236 @@ function PageHeader({ eyebrow, title, detail }: { eyebrow: string; title: string
   return <div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-dot" /> {eyebrow}</div><h1>{title}<span className="heading-period">.</span></h1><p>{detail}</p></div></div>;
 }
 
+function EnterpriseTable({ columns, rows }: { columns: string[]; rows: Array<Array<ReactNode>> }) {
+  return <div className="enterprise-table-wrap"><table className="enterprise-table">
+    <thead><tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead>
+    <tbody>{rows.map((row, index) => <tr key={index}>{row.map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}</tr>)}</tbody>
+  </table></div>;
+}
+
+function EnterprisePageShell({ title, eyebrow, actions, children }: { title: string; eyebrow: string; actions?: ReactNode; children: ReactNode }) {
+  return <section className="page-content enterprise-page">
+    <div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-dot" /> {eyebrow}</div><h1>{title}</h1></div>{actions}</div>
+    {children}
+  </section>;
+}
+
+function BranchesPage() {
+  const [formError, setFormError] = useState("");
+  const [success, setSuccess] = useState("");
+  const branches = useQuery({
+    queryKey: ["branches"],
+    queryFn: async () => (await api.get("/branches")).data as Array<{ id: number; name: string; code: string; address: string | null; phone: string | null; isActive: boolean }>,
+  });
+  const create = useMutation({
+    mutationFn: async (values: { name: string; code: string; address: string; phone: string; email: string }) =>
+      (await api.post("/branches", { ...values, isActive: true, allowNegativeStock: false })).data,
+    onSuccess: () => {
+      setSuccess("Branch created successfully.");
+      setFormError("");
+      void branches.refetch();
+    },
+    onError: (error) => setFormError(getErrorMessage(error)),
+  });
+  const branchRows = branches.data ?? [];
+  return <EnterprisePageShell title="Branch Management" eyebrow="ENTERPRISE NETWORK" actions={<button className="button button-dark" onClick={() => document.querySelector<HTMLInputElement>("#branch-name")?.focus()}><Plus size={15} /> Add branch</button>}>
+    {formError && <div role="alert" className="error-banner">{formError}</div>}
+    {success && <div role="status" className="success-banner">{success}</div>}
+    <div className="enterprise-grid">
+      <section className="panel enterprise-form-panel">
+        <div className="panel-heading"><div><div className="eyebrow">NEW LOCATION</div><h2>Register branch</h2></div></div>
+        <form className="enterprise-form" onSubmit={(event) => {
+          event.preventDefault();
+          const values = new FormData(event.currentTarget);
+          setFormError("");
+          setSuccess("");
+          create.mutate({
+            name: String(values.get("name") ?? ""),
+            code: String(values.get("code") ?? ""),
+            address: String(values.get("address") ?? ""),
+            phone: String(values.get("phone") ?? ""),
+            email: String(values.get("email") ?? ""),
+          });
+        }}>
+          <label>Branch name<input id="branch-name" name="name" required placeholder="e.g. Westlands Branch" /></label>
+          <label>Branch code<input name="code" required placeholder="WEST" /></label>
+          <label>Address<input name="address" placeholder="Physical address" /></label>
+          <label>Phone<input name="phone" placeholder="+254..." /></label>
+          <label>Email<input name="email" type="email" placeholder="branch@example.com" /></label>
+          <button className="button button-dark" disabled={create.isPending}>{create.isPending ? "Saving…" : "Create branch"}</button>
+        </form>
+      </section>
+      <section className="panel enterprise-table-panel">
+        <div className="panel-heading"><div><div className="eyebrow">LOCATIONS</div><h2>Active branches</h2></div><span className="count-badge">{branchRows.length}</span></div>
+        {branches.isPending ? <LoadingRows /> : branches.isError ? <ErrorBanner message={getErrorMessage(branches.error)} onRetry={() => void branches.refetch()} /> :
+          branchRows.length ? <EnterpriseTable
+            columns={["Branch", "Code", "Address", "Phone", "Status"]}
+            rows={branchRows.map((branch) => [
+              <strong key="name">{branch.name}</strong>,
+              branch.code,
+              branch.address || "—",
+              branch.phone || "—",
+              <span key="status" className={`enterprise-status ${branch.isActive ? "success" : "warning"}`}>{branch.isActive ? "Active" : "Inactive"}</span>,
+            ])}
+          /> : <EmptyState title="No branches" detail="Create the first branch location." />}
+      </section>
+    </div>
+  </EnterprisePageShell>;
+}
+
+function OfflineSyncPage() {
+  const sync = useQuery({
+    queryKey: ["offline-sync"],
+    queryFn: async () => (await api.get("/sync-monitor/offline-sales")).data as Array<{ offlineId: string; branch: string; cashier: string; status: string; receiptNumber: string | null; attempts: number; error: string | null; createdAt: string }>,
+  });
+  const rows = sync.data ?? [];
+  return <EnterprisePageShell title="Offline Synchronization" eyebrow="POS NETWORK MONITOR" actions={<button className="button button-light" onClick={() => void sync.refetch()}><RefreshCw size={15} /> Refresh</button>}>
+    <section className="panel enterprise-table-panel">
+      <div className="panel-heading"><div><div className="eyebrow">SYNC QUEUE</div><h2>Transaction monitor</h2></div><span className="count-badge">{rows.length}</span></div>
+      {sync.isPending ? <LoadingRows /> : sync.isError ? <ErrorBanner message={getErrorMessage(sync.error)} onRetry={() => void sync.refetch()} /> :
+        rows.length ? <EnterpriseTable
+          columns={["Offline ID", "Branch", "Cashier", "Status", "Receipt", "Attempts", "Created"]}
+          rows={rows.map((row) => [row.offlineId, row.branch, row.cashier,
+            <span key="status" className={`enterprise-status ${row.status === "synced" ? "success" : row.status === "failed" ? "danger" : "warning"}`}>{row.status.toUpperCase()}</span>,
+            row.receiptNumber || "—", row.attempts, new Date(row.createdAt).toLocaleString("en-KE")])}
+        /> : <EmptyState title="No offline transactions" detail="Pending offline sales will appear here." />}
+    </section>
+  </EnterprisePageShell>;
+}
+
+function BackupsPage() {
+  const backups = useQuery({
+    queryKey: ["backups"],
+    queryFn: async () => (await api.get("/backups")).data as Array<{ id: number; filename: string; status: string; sizeBytes: number | null; checksum: string; createdAt: string }>,
+  });
+  const create = useMutation({
+    mutationFn: async () => (await api.post("/backups/create")).data,
+    onSuccess: () => void backups.refetch(),
+  });
+  const backupRows = backups.data ?? [];
+  return <EnterprisePageShell title="Database Backups" eyebrow="DATA PROTECTION" actions={<button className="button button-dark" onClick={() => create.mutate()} disabled={create.isPending}><ShieldCheck size={15} /> {create.isPending ? "Creating…" : "Create backup"}</button>}>
+    {create.isError && <div role="alert" className="error-banner">{getErrorMessage(create.error)}</div>}
+    <section className="panel enterprise-summary-panel">
+      <div className="panel-heading"><div><div className="eyebrow">POLICY</div><h2>Backup configuration</h2></div></div>
+      <p>Encrypted backups are written to <strong>BACKUP_STORAGE_DIR</strong> outside the live database. Scheduled jobs and restoration require administrator control.</p>
+    </section>
+    <section className="panel enterprise-table-panel">
+      <div className="panel-heading"><div><div className="eyebrow">HISTORY</div><h2>Available backups</h2></div><span className="count-badge">{backupRows.length}</span></div>
+      {backups.isPending ? <LoadingRows /> : backups.isError ? <ErrorBanner message={getErrorMessage(backups.error)} onRetry={() => void backups.refetch()} /> : backupRows.length ? <EnterpriseTable
+        columns={["File", "Status", "Size", "Checksum", "Created"]}
+        rows={backupRows.map((row) => [row.filename, <span key="status" className={`enterprise-status ${row.status === "verified" ? "success" : "danger"}`}>{row.status}</span>, row.sizeBytes ? `${Math.ceil(row.sizeBytes / 1024)} KB` : "—", row.checksum.slice(0, 16), new Date(row.createdAt).toLocaleString("en-KE")])}
+      /> : <EmptyState title="No backups" detail="Create the first verified database backup." />}
+    </section>
+  </EnterprisePageShell>;
+}
+
+function PriceHistoryPage() {
+  const [search, setSearch] = useState("");
+  const history = useQuery({
+    queryKey: ["price-history", search],
+    queryFn: async () => (await api.get("/price-history", { params: { q: search || undefined } })).data as Array<{ productName: string; sku: string; branch: string | null; changedBy: string | null; previousBuyingPrice: string | null; newBuyingPrice: string | null; previousSellingPrice: string | null; newSellingPrice: string | null; reason: string | null; createdAt: string }>,
+  });
+  const rows = history.data ?? [];
+  return <EnterprisePageShell title="Product Price History" eyebrow="AUDIT AND CONTROL">
+    <section className="panel enterprise-table-panel">
+      <div className="enterprise-toolbar"><div className="table-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search product or SKU" /></div></div>
+      {history.isPending ? <LoadingRows /> : history.isError ? <ErrorBanner message={getErrorMessage(history.error)} onRetry={() => void history.refetch()} /> :
+        rows.length ? <EnterpriseTable
+          columns={["Product", "Branch", "Buying price", "Selling price", "Changed by", "Reason", "Date"]}
+          rows={rows.map((row) => [`${row.productName} (${row.sku})`, row.branch || "All branches",
+            `${row.previousBuyingPrice ?? "—"} → ${row.newBuyingPrice ?? "—"}`,
+            `${row.previousSellingPrice ?? "—"} → ${row.newSellingPrice ?? "—"}`,
+            row.changedBy || "System", row.reason || "—", new Date(row.createdAt).toLocaleString("en-KE")])}
+        /> : <EmptyState title="No price changes" detail="Authorized buying or selling price changes will appear here." />}
+    </section>
+  </EnterprisePageShell>;
+}
+
+function NotificationsPage() {
+  const notifications = useQuery({
+    queryKey: ["notifications"],
+    queryFn: async () => (await api.get("/notifications")).data as Array<{ recipient: string; status: string; providerMessageId: string | null; attempts: number; error: string | null; createdAt: string }>,
+  });
+  const settings = useQuery({
+    queryKey: ["notification-settings"],
+    queryFn: async () => (await api.get("/notifications/settings")).data,
+  });
+  const send = useMutation({
+    mutationFn: async (values: { recipient: string; message: string }) => (await api.post("/notifications/send", values)).data,
+  });
+  const rows = notifications.data ?? [];
+  return <EnterprisePageShell title="Notification Centre" eyebrow="WHATSAPP AND DELIVERY" actions={<button className="button button-dark" onClick={() => document.querySelector<HTMLInputElement>("#notification-recipient")?.focus()}><Smartphone size={15} /> New message</button>}>
+    {send.isError && <div role="alert" className="error-banner">{getErrorMessage(send.error)}</div>}
+    <div className="enterprise-grid">
+      <section className="panel enterprise-form-panel">
+        <div className="panel-heading"><div><div className="eyebrow">WHATSAPP</div><h2>Send notification</h2></div></div>
+        <form className="enterprise-form" onSubmit={(event) => {
+          event.preventDefault();
+          const values = new FormData(event.currentTarget);
+          send.mutate({ recipient: String(values.get("recipient") ?? ""), message: String(values.get("message") ?? "") });
+          event.currentTarget.reset();
+        }}>
+          <label>Recipient phone<input id="notification-recipient" name="recipient" required placeholder="2547XXXXXXXX" /></label>
+          <label>Message<textarea name="message" required rows={5} placeholder="Enter notification text" /></label>
+          <button className="button button-dark" disabled={send.isPending || settings.isError}>{send.isPending ? "Sending…" : "Send WhatsApp"}</button>
+        </form>
+      </section>
+      <section className="panel enterprise-table-panel">
+        <div className="panel-heading"><div><div className="eyebrow">DELIVERY HISTORY</div><h2>Messages</h2></div><span className="count-badge">{rows.length}</span></div>
+        {notifications.isPending ? <LoadingRows /> : notifications.isError ? <ErrorBanner message={getErrorMessage(notifications.error)} onRetry={() => void notifications.refetch()} /> : rows.length ? <EnterpriseTable
+          columns={["Recipient", "Status", "Provider ID", "Attempts", "Sent"]}
+          rows={rows.map((row) => [row.recipient, <span key="status" className={`enterprise-status ${row.status === "delivered" || row.status === "sent" ? "success" : row.status === "failed" ? "danger" : "warning"}`}>{row.status}</span>, row.providerMessageId || "—", row.attempts, new Date(row.createdAt).toLocaleString("en-KE")])}
+        /> : <EmptyState title="No notifications" detail="Delivery attempts will appear here." />}
+      </section>
+    </div>
+  </EnterprisePageShell>;
+}
+
+function ElectronicReceiptsPage() {
+  const [search, setSearch] = useState("");
+  const receipts = useQuery({
+    queryKey: ["electronic-receipts", search],
+    queryFn: async () => (await api.get("/electronic-receipts", { params: { q: search || undefined } })).data as Array<{ id: number; saleId: number; receiptNumber: string; total: string; cashier: string; branch: string; createdAt: string }>,
+  });
+  const rows = receipts.data ?? [];
+  return <EnterprisePageShell title="Electronic Receipts" eyebrow="DIGITAL DOCUMENTS">
+    <section className="panel enterprise-table-panel">
+      <div className="enterprise-toolbar"><div className="table-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search receipt or cashier" /></div></div>
+      {receipts.isPending ? <LoadingRows /> : receipts.isError ? <ErrorBanner message={getErrorMessage(receipts.error)} onRetry={() => void receipts.refetch()} /> :
+        rows.length ? <EnterpriseTable
+          columns={["Receipt", "Branch", "Cashier", "Total", "Date", "Action"]}
+          rows={rows.map((row) => [row.receiptNumber, row.branch, row.cashier, money(row.total),
+            new Date(row.createdAt).toLocaleString("en-KE"),
+            <Link key="view" className="enterprise-link" to={`/sales`}>View sale</Link>])}
+        /> : <EmptyState title="No electronic receipts" detail="Completed sales generate digital receipts automatically." />}
+    </section>
+  </EnterprisePageShell>;
+}
+
+function ComparisonsPage() {
+  const [from, setFrom] = useState(() => {
+    const date = new Date();
+    date.setDate(date.getDate() - 29);
+    return dateInputValue(date);
+  });
+  const [to, setTo] = useState(() => dateInputValue(new Date()));
+  const report = useQuery({
+    queryKey: ["enterprise-comparison", from, to],
+    queryFn: async () => (await api.get("/reports/summary", { params: { from, to } })).data,
+  });
+  const data = report.data as { summary?: { revenue?: string; grossProfit?: string | null; netProfit?: string | null; expenses?: string; transactions?: number; averageOrder?: string } } | undefined;
+  const summary = data?.summary;
+  return <EnterprisePageShell title="Business Comparisons" eyebrow="PERFORMANCE ANALYTICS" actions={<div className="enterprise-date-controls"><input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /><input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></div>}>
+    {report.isError ? <ErrorBanner message={getErrorMessage(report.error)} onRetry={() => void report.refetch()} /> : <div className="enterprise-comparison-grid">
+      <div className="enterprise-kpi"><span>Revenue</span><strong>{summary ? money(summary.revenue ?? "0") : "—"}</strong></div>
+      <div className="enterprise-kpi"><span>Gross profit</span><strong>{summary?.grossProfit ? money(summary.grossProfit) : "Not costed"}</strong></div>
+      <div className="enterprise-kpi"><span>Net profit</span><strong>{summary?.netProfit ? money(summary.netProfit) : "Not costed"}</strong></div>
+      <div className="enterprise-kpi"><span>Transactions</span><strong>{summary?.transactions ?? "—"}</strong></div>
+      <div className="enterprise-kpi"><span>Expenses</span><strong>{summary ? money(summary.expenses ?? "0") : "—"}</strong></div>
+    </div>}
+  </EnterprisePageShell>;
+}
+
 function MetricCard({ label, value, caption, icon, tone, loading }: { label: string; value: string; caption: string; icon: ReactNode; tone?: string; loading: boolean }) {
   return <div className={`metric-card ${tone ?? ""}`}><div className="metric-top"><span>{label}</span><div className="metric-icon">{icon}</div></div><div className={`metric-value ${loading ? "skeleton" : ""}`}>{loading ? " " : value}</div><div className="metric-caption">{caption}</div></div>;
 }
@@ -2728,6 +2973,10 @@ function PosSignOutConfirmation({
 function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: number; name: string; username: string }; onLogout: () => void }) {
   const queryClient = useQueryClient();
   const canSell = user.roles.some((role) => ["admin", "manager", "cashier"].includes(role));
+  const [posConnectionStatus, setPosConnectionStatus] = useState<"ONLINE" | "OFFLINE" | "SYNCING" | "SYNC FAILED">(
+    typeof navigator !== "undefined" && navigator.onLine ? "ONLINE" : "OFFLINE",
+  );
+  const [pendingOfflineCount, setPendingOfflineCount] = useState(0);
   const [search, setSearch] = useState("");
   const [cart, setCart] = useState<PosCartLine[]>([]);
   const [saleDiscount, setSaleDiscount] = useState("0.00");
@@ -2779,6 +3028,57 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     if (saleTableRef.current) saleTableRef.current.scrollTop = saleTableRef.current.scrollHeight;
     scannerRef.current?.focus({ preventScroll: true });
   }, [cart.length]);
+  useEffect(() => {
+    const refreshOfflineCount = async () => {
+      try {
+        setPendingOfflineCount((await listOfflineSales()).filter((record) => record.status !== "syncing").length);
+      } catch {
+        setPendingOfflineCount(0);
+      }
+    };
+    const synchronizeOfflineSales = async () => {
+      setPosConnectionStatus("SYNCING");
+      let remaining = 0;
+      try {
+        const records = await listOfflineSales();
+        remaining = records.length;
+        for (const record of records) {
+          const syncingRecord = { ...record, status: "syncing" as const, attempts: record.attempts + 1 };
+          await updateOfflineSale(syncingRecord);
+          try {
+            await api.post("/sync-monitor/offline-sales", record, {
+              headers: { "Idempotency-Key": record.offlineId },
+            });
+            await removeOfflineSale(record.offlineId);
+            remaining -= 1;
+          } catch (error) {
+            const failedRecord = {
+              ...record,
+              status: "failed" as const,
+              attempts: syncingRecord.attempts,
+              error: getErrorMessage(error),
+            };
+            await updateOfflineSale(failedRecord);
+          }
+        }
+        setPendingOfflineCount(remaining);
+        setPosConnectionStatus(remaining > 0 ? "SYNC FAILED" : "ONLINE");
+      } catch {
+        setPosConnectionStatus("SYNC FAILED");
+        await refreshOfflineCount();
+      }
+    };
+    const handleOnline = () => void synchronizeOfflineSales();
+    const handleOffline = () => setPosConnectionStatus("OFFLINE");
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    void refreshOfflineCount();
+    if (navigator.onLine) void synchronizeOfflineSales();
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
   const activeShift = useQuery({
     queryKey: ["active-shift"],
     queryFn: async () => (await api.get<{ shift: { id: number; openingCash: string; openedAt: string; branchName: string } | null }>("/shifts/active")).data.shift,
@@ -2922,11 +3222,40 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
         ...(["cash", "split"].includes(paymentMethod) ? { cashReceived: amountPaid } : {}),
         payments,
       };
-      return (await api.post<{ sale: { id: number; receiptNumber: string; total: string; status: string } }>("/sales", body, {
-        headers: { "Idempotency-Key": idempotencyRef.current },
-      })).data.sale;
+      try {
+        return {
+          offlineQueued: false as const,
+          sale: (await api.post<{ sale: { id: number; receiptNumber: string; total: string; status: string } }>("/sales", body, {
+            headers: { "Idempotency-Key": idempotencyRef.current },
+          })).data.sale,
+        };
+      } catch (error) {
+        if (navigator.onLine || paymentMethod !== "cash") throw error;
+        const record: OfflineSaleRecord = {
+          offlineId: idempotencyRef.current,
+          items: body.items,
+          discount: body.discount,
+          payments: [{ method: "cash", amount: fromCents(payableCents) }],
+          cashReceived: amountPaid,
+          recordedAt: new Date().toISOString(),
+          status: "pending",
+          attempts: 0,
+        };
+        await saveOfflineSale(record);
+        return { offlineQueued: true as const, offlineId: record.offlineId };
+      }
     },
-    onSuccess: async (sale) => {
+    onSuccess: async (result) => {
+      if (result.offlineQueued) {
+        setPosConnectionStatus("OFFLINE");
+        setPendingOfflineCount((count) => count + 1);
+        setToast("Cash sale saved offline. It is queued for server confirmation.");
+        setCashConfirmOpen(false);
+        setCheckoutError("");
+        idempotencyRef.current = null;
+        return;
+      }
+      const sale = result.sale;
       setToast(`Sale ${sale.receiptNumber} completed · ${money(sale.total)}`);
       setCart([]);
       setSaleDiscount("0.00");
@@ -3539,7 +3868,13 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
                   : <div className="shift-needed"><span>Start a cashier shift.</span><label>Opening cash<input value={openingCash} inputMode="decimal" onChange={(event) => setOpeningCash(event.target.value)} /></label><button className="shift-open-button" onClick={() => openShiftMutation.mutate()}>{openShiftMutation.isPending ? "Opening…" : "Open shift"}</button></div>}
         </aside>
       </div>
-      <footer className="pos-statusbar"><span><i /> Ready for new sale...</span><time>{new Date().toLocaleString("en-KE")}</time><b>● Connected</b></footer>
+      <footer className="pos-statusbar">
+        <span><i /> Ready for new sale...</span>
+        <time>{new Date().toLocaleString("en-KE")}</time>
+        <b className={`pos-network-status status-${posConnectionStatus.toLowerCase().replace(" ", "-")}`}>
+          ● {posConnectionStatus}{pendingOfflineCount > 0 ? ` · ${pendingOfflineCount} pending` : ""}
+        </b>
+      </footer>
       {cashConfirmOpen && <div className="pos-confirm-screen cash-confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="cash-confirm-title">
         <section className="pos-confirm-card">
           <span className="pos-confirm-eyebrow">CASH PAYMENT</span>

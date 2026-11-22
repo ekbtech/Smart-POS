@@ -48,6 +48,15 @@ import {
   cancelFailedMpesaPayment, getMpesaAvailability, getMpesaPaymentStatus, mpesaPaymentRequestSchema,
   receiveMpesaCallback, startMpesaPayment,
 } from "./mpesa.js";
+import {
+  assignBranchUser, branchAssignmentSchema, branchSchema, createBranch, createDatabaseBackup,
+  getBackupSettings, getNotificationSettings, listBackups, listBranches as listEnterpriseBranches, listElectronicReceipts,
+  listNotifications, listOfflineSync, listPriceHistory, notificationSendSchema,
+  notificationSettingsSchema, offlineSyncSchema, priceHistorySchema, sendWhatsAppNotification,
+  updateBackupSettings, updateBranch, updateBranchSchema, updateNotificationSettings,
+  verifyBackup, backupSettingsSchema,
+  runScheduledDatabaseBackup,
+} from "./enterprise.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 4000);
@@ -148,6 +157,135 @@ function handleOperation(
 }
 
 app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
+app.get("/api/branches", authenticate, async (req, res, next) => {
+  handleOperation(() => listEnterpriseBranches(req.user!), res, next);
+});
+app.post("/api/branches", authenticate, requireRoles("admin"), (req, res, next) => {
+  try {
+    const input = branchSchema.parse(req.body);
+    handleOperation(() => createBranch(input, req.user!), res, next, 201);
+  } catch (error) { next(error); }
+});
+app.patch("/api/branches/:id", authenticate, requireRoles("admin"), (req, res, next) => {
+  const id = positiveId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid branch ID." }); return; }
+  try {
+    const input = updateBranchSchema.parse(req.body);
+    handleOperation(() => updateBranch(id, input, req.user!), res, next);
+  } catch (error) { next(error); }
+});
+app.post("/api/users/:id/branch-assignment", authenticate, requireRoles("admin"), (req, res, next) => {
+  const id = positiveId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid user ID." }); return; }
+  try {
+    const input = branchAssignmentSchema.parse(req.body);
+    handleOperation(() => assignBranchUser(id, input, req.user!), res, next);
+  } catch (error) { next(error); }
+});
+app.get("/api/price-history", authenticate, requireAnyModule("price_history", "products"), (req, res, next) => {
+  try {
+    const input = priceHistorySchema.parse(req.query);
+    handleOperation(() => listPriceHistory(input, req.user!), res, next);
+  } catch (error) { next(error); }
+});
+app.get("/api/sync-monitor/offline-sales", authenticate, requireRoles("admin", "manager"), (req, res, next) => {
+  handleOperation(() => listOfflineSync(req.user!), res, next);
+});
+app.post("/api/sync-monitor/offline-sales", authenticate, authenticatePos, requireRoles("admin", "manager", "cashier"), async (req, res, next) => {
+  try {
+    const syncUser = req.posUser;
+    if (!syncUser) { res.status(401).json({ error: "POS authentication required." }); return; }
+    const input = offlineSyncSchema.parse(req.body);
+    if (input.payments.length !== 1 || input.payments[0]?.method !== "cash") {
+      throw new HttpError(400, "Offline synchronization accepts only confirmed cash payments.");
+    }
+    const [existing] = await pool.execute<Array<{ id: number; sale_id: number | null; receipt_number: string | null; status: string } & import("mysql2").RowDataPacket>>(
+      "SELECT id, sale_id, receipt_number, status FROM offline_sale_sync WHERE branch_id=? AND offline_id=?",
+      [syncUser.branchId, input.offlineId],
+    );
+    if (existing[0]?.status === "synced" && existing[0].sale_id) {
+      res.status(200).json({ offlineId: input.offlineId, status: "synced", saleId: existing[0].sale_id, receiptNumber: existing[0].receipt_number });
+      return;
+    }
+    void (async () => {
+      await pool.execute(
+        `INSERT INTO offline_sale_sync (offline_id, branch_id, cashier_id, status, payload)
+         VALUES (?, ?, ?, 'syncing', ?)
+         ON DUPLICATE KEY UPDATE status='syncing', attempts=attempts+1, error_message=NULL, payload=VALUES(payload)`,
+        [input.offlineId, syncUser.branchId, syncUser.id, JSON.stringify(input)],
+      );
+      const sale = await createSale({
+        items: input.items,
+        discount: input.discount,
+        cashReceived: input.cashReceived ?? undefined,
+        payments: input.payments.map((payment) => ({
+          method: payment.method,
+          amount: payment.amount,
+          ...(payment.providerReference ? { providerReference: payment.providerReference } : {}),
+        })),
+      }, input.offlineId, syncUser);
+      await pool.execute(
+        "UPDATE offline_sale_sync SET status='synced', sale_id=?, receipt_number=?, synced_at=CURRENT_TIMESTAMP WHERE branch_id=? AND offline_id=?",
+        [sale.id, sale.receiptNumber, syncUser.branchId, input.offlineId],
+      );
+      res.status(sale.replayed ? 200 : 201).json({
+        offlineId: input.offlineId, status: "synced", saleId: sale.id, receiptNumber: sale.receiptNumber,
+      });
+    })().catch(async (error) => {
+      const message = error instanceof Error ? error.message : "Synchronization failed.";
+      await pool.execute(
+        "UPDATE offline_sale_sync SET status='failed', error_message=?, attempts=attempts+1 WHERE branch_id=? AND offline_id=?",
+        [message.slice(0, 1000), syncUser.branchId, input.offlineId],
+      );
+      next(error);
+    });
+  } catch (error) { next(error); }
+});
+app.get("/api/backups/settings", authenticate, requireRoles("admin"), (req, res, next) => {
+  handleOperation(() => getBackupSettings(req.user!), res, next);
+});
+app.put("/api/backups/settings", authenticate, requireRoles("admin"), (req, res, next) => {
+  try {
+    const input = backupSettingsSchema.parse(req.body);
+    handleOperation(() => updateBackupSettings(input, req.user!), res, next);
+  } catch (error) { next(error); }
+});
+app.get("/api/backups", authenticate, requireRoles("admin"), (req, res, next) => {
+  handleOperation(() => listBackups(req.user!), res, next);
+});
+app.post("/api/backups/create", authenticate, requireRoles("admin"), (req, res, next) => {
+  handleOperation(() => createDatabaseBackup(req.user!), res, next, 201);
+});
+app.post("/api/backups/:id/verify", authenticate, requireRoles("admin"), (req, res, next) => {
+  const id = positiveId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid backup ID." }); return; }
+  handleOperation(() => verifyBackup(id, req.user!), res, next);
+});
+app.get("/api/notifications/settings", authenticate, requireRoles("admin"), (req, res, next) => {
+  handleOperation(() => getNotificationSettings(req.user!), res, next);
+});
+app.put("/api/notifications/settings", authenticate, requireRoles("admin"), (req, res, next) => {
+  try {
+    const input = notificationSettingsSchema.parse(req.body);
+    handleOperation(() => updateNotificationSettings(input, req.user!), res, next);
+  } catch (error) { next(error); }
+});
+app.get("/api/notifications", authenticate, requireAnyModule("notifications", "receipts"), (req, res, next) => {
+  handleOperation(() => listNotifications(req.user!), res, next);
+});
+app.post("/api/notifications/send", authenticate, requireRoles("admin", "manager"), (req, res, next) => {
+  try {
+    const input = notificationSendSchema.parse(req.body);
+    handleOperation(() => sendWhatsAppNotification(input, req.user!), res, next, 202);
+  } catch (error) { next(error); }
+});
+app.get("/api/electronic-receipts", authenticate, requireAnyModule("receipts", "sales"), (req, res, next) => {
+  const q = typeof req.query.q === "string" ? req.query.q.trim().slice(0, 100) : "";
+  const branchId = typeof req.query.branchId === "string" ? positiveId(req.query.branchId) : undefined;
+  const from = typeof req.query.from === "string" ? req.query.from : "";
+  const to = typeof req.query.to === "string" ? req.query.to : "";
+  handleOperation(() => listElectronicReceipts(req.user!, q, branchId, from, to), res, next);
+});
 app.post("/api/auth/login", loginLimiter, (req, res, next) => void login(req, res).catch(next));
 app.post("/api/auth/logout", authenticate, (req, res, next) => void logout(req, res).catch(next));
 app.get("/api/auth/me", authenticate, currentUser);
@@ -1464,6 +1602,15 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
 });
 
 const server = app.listen(port, () => console.info(`Smart POS API listening on port ${port}`));
+const scheduledBackupTimer = setInterval(() => {
+  void runScheduledDatabaseBackup().catch((error: unknown) => {
+    console.error("Scheduled database backup failed.", error);
+  });
+}, 60 * 60 * 1000);
+scheduledBackupTimer.unref();
+void runScheduledDatabaseBackup().catch((error: unknown) => {
+  console.error("Scheduled database backup startup check failed.", error);
+});
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     server.close(() => void pool.end().then(() => process.exit(0)));

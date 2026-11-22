@@ -562,6 +562,10 @@ export async function createSale(
         "INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, 'sale.created', 'sale', ?, ?)",
         [user.id, String(saleId), JSON.stringify({ receiptNumber, total: total.toFixed(2), status: "completed" })],
       );
+      await connection.execute(
+        "INSERT INTO electronic_receipts (sale_id, branch_id, receipt_number) VALUES (?, ?, ?)",
+        [saleId, user.branchId, receiptNumber],
+      );
       return {
         id: saleId, receiptNumber, subtotal: subtotal.toFixed(2), discount: discount.toFixed(2),
         tax: taxTotal.toFixed(2), total: total.toFixed(2), cashReceived: cashPayments.length ? cashReceived.toFixed(2) : null,

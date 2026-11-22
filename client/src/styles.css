@@ -1590,6 +1590,179 @@ button.inventory-metric:hover, button.inventory-metric.selected { border-color: 
   .mpesa-payment-card { max-height: calc(100dvh - 32px); }
 }
 
+.enterprise-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, .75fr) minmax(0, 1.25fr);
+  gap: 14px;
+}
+.enterprise-form-panel,
+.enterprise-table-panel,
+.enterprise-summary-panel {
+  min-height: 280px;
+  border-radius: 9px;
+}
+.enterprise-form {
+  display: grid;
+  gap: 11px;
+  padding: 0 0 16px;
+}
+.enterprise-form label {
+  display: grid;
+  gap: 6px;
+  color: #68756c;
+  font-size: 10px;
+  font-weight: 700;
+}
+.enterprise-form input,
+.enterprise-form textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #dfe6e0;
+  border-radius: 5px;
+  background: #fff;
+  color: #26382d;
+  padding: 9px 10px;
+  font: inherit;
+  font-size: 11px;
+  outline: 0;
+}
+.enterprise-form textarea { resize: vertical; }
+.enterprise-form input:focus,
+.enterprise-form textarea:focus {
+  border-color: #76a37e;
+  box-shadow: 0 0 0 3px #edf5ed;
+}
+.enterprise-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+.enterprise-table {
+  width: 100%;
+  min-width: 620px;
+  border-collapse: collapse;
+  font-size: 10px;
+}
+.enterprise-table th,
+.enterprise-table td {
+  height: 44px;
+  border-bottom: 1px solid #edf1ed;
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: middle;
+}
+.enterprise-table th {
+  background: #f7f9f7;
+  color: #657268;
+  font-size: 8px;
+  letter-spacing: .55px;
+  text-transform: uppercase;
+}
+.enterprise-table td { color: #3f4e44; }
+.enterprise-table tbody tr:hover { background: #fafcf9; }
+.enterprise-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 8px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+.enterprise-status.success { background: #edf7ef; color: #327343; }
+.enterprise-status.warning { background: #fff7e8; color: #946627; }
+.enterprise-status.danger { background: #fff0f0; color: #a53d3d; }
+.enterprise-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 0;
+  border-bottom: 1px solid #edf1ed;
+}
+.enterprise-toolbar .table-search {
+  width: min(360px, 100%);
+  height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #dde5df;
+  border-radius: 5px;
+  background: #fff;
+  color: #8a968d;
+  padding: 0 10px;
+}
+.enterprise-toolbar .table-search input {
+  min-width: 0;
+  flex: 1;
+  height: 36px;
+  border: 0;
+  background: transparent;
+  outline: 0;
+  color: #34443a;
+  font-size: 10px;
+}
+.enterprise-summary-panel p {
+  color: #738078;
+  font-size: 11px;
+  line-height: 1.7;
+}
+.enterprise-link {
+  color: #356d48;
+  font-size: 9px;
+  font-weight: 750;
+}
+.enterprise-date-controls {
+  display: flex;
+  gap: 8px;
+}
+.enterprise-date-controls input {
+  height: 38px;
+  border: 1px solid #dfe5df;
+  border-radius: 5px;
+  background: #fff;
+  color: #34443a;
+  padding: 0 8px;
+  font-size: 10px;
+}
+.enterprise-comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+.enterprise-kpi {
+  min-height: 112px;
+  display: grid;
+  align-content: center;
+  gap: 12px;
+  border: 1px solid #e2e8e2;
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px;
+}
+.enterprise-kpi span { color: #87948a; font-size: 9px; font-weight: 700; }
+.enterprise-kpi strong { color: #294936; font: 750 18px "DM Sans", "Segoe UI", sans-serif; }
+
+.pos-network-status.status-offline,
+.pos-network-status.status-sync-failed {
+  color: #a76732;
+}
+.pos-network-status.status-syncing {
+  color: #356d48;
+}
+
+@media (max-width: 1120px) {
+  .enterprise-grid { grid-template-columns: 1fr; }
+  .enterprise-comparison-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+  .enterprise-comparison-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .enterprise-date-controls { width: 100%; }
+  .enterprise-date-controls input { min-width: 0; flex: 1; }
+  .enterprise-kpi { min-height: 96px; padding: 11px; }
+  .enterprise-kpi strong { font-size: 15px; }
+}
+
 /* Admin overview command center */
 .dashboard-page.admin-overview {
   min-height: calc(100vh - 65px);

@@ -22,6 +22,7 @@ const ttl = process.env.JWT_TTL ?? "8h";
 const landingModuleIds = new Set([
   "dashboard", "pos", "sales", "products", "inventory", "purchases", "suppliers",
   "customers", "expenses", "shifts", "reports",
+  "branches", "sync_monitor", "backups", "price_history", "notifications", "receipts", "comparisons",
 ]);
 
 type UserRow = RowDataPacket & {

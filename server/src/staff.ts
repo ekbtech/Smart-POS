@@ -16,6 +16,7 @@ export const staffRoles = [
 export const manageableModuleIds = new Set([
   "dashboard", "pos", "sales", "products", "inventory", "purchases", "suppliers",
   "customers", "expenses", "shifts", "reports", "permissions",
+  "branches", "sync_monitor", "backups", "price_history", "notifications", "receipts", "comparisons",
 ]);
 
 export const createStaffSchema = z.object({
