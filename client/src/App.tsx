@@ -335,7 +335,6 @@ function AppShell({ user }: { user: User }) {
   const pageLabel = pageLabels[location.pathname];
   return (
     <div className={`app-frame${mobileSidebarOpen ? " is-mobile-nav-open" : ""}`}>
-      {mobileSidebarOpen && <button className="sidebar-backdrop" aria-label="Close navigation" onClick={() => setMobileSidebarOpen(false)} />}
       <aside className="sidebar" id="workspace-sidebar">
         <Link to="/" className="brand"><span className="brand-mark">s</span><span>smart<strong>pos</strong></span></Link>
         <div className="branch-switcher"><div className="branch-avatar">M</div><div><strong>Main branch</strong><small>Retail workspace</small></div><ChevronDown size={15} /></div>

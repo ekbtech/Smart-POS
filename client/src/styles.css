@@ -94,7 +94,7 @@ a { color: inherit; text-decoration: none; }
 .boot-screen { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 13px; color: var(--muted); font-size: 13px; }
 .brand-mark { width: 31px; height: 31px; border-radius: 10px 10px 10px 4px; background: var(--pos-primary); color: var(--pos-text-on-primary); display: inline-flex; align-items: center; justify-content: center; font: 700 21px Georgia, serif; text-transform: lowercase; }
 .app-frame { min-height: 100vh; }
-.sidebar { position: fixed; inset: 0 auto 0 0; width: 248px; background: #fff; border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 27px 17px 15px; z-index: 5; }
+.sidebar { position: relative; width: 248px; background: #fff; border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 27px 17px 15px; z-index: auto; }
 .brand { display: flex; align-items: center; gap: 10px; padding: 0 8px; color: #29362e; font-size: 18px; letter-spacing: -.7px; font-weight: 500; }
 .brand strong { color: #43845a; font-weight: 700; }
 .branch-switcher { display: flex; align-items: center; gap: 10px; margin: 36px 0 31px; padding: 10px 9px; border: 1px solid #ecefeb; border-radius: 9px; }
@@ -1254,8 +1254,8 @@ button.inventory-metric:hover, button.inventory-metric.selected { border-color: 
 }
 
 .sidebar {
-  position: fixed;
-  inset: 0 auto 0 0;
+  position: relative;
+  inset: auto;
   z-index: 31;
   width: min(270px, calc(100vw - 56px));
   height: 100vh;
@@ -1348,9 +1348,9 @@ button.inventory-metric:hover, button.inventory-metric.selected { border-color: 
   .topbar .icon-button { width: 36px; height: 36px; }
   .pos-page.pos-desktop { height: calc(100dvh - 58px); min-height: calc(100dvh - 58px); }
   .app-frame .sidebar {
-    position: fixed;
-    inset: 0 auto 0 0;
-    z-index: 31;
+    position: relative;
+    inset: auto;
+    z-index: auto;
     width: min(270px, calc(100vw - 56px));
     max-width: 100vw;
     height: 100vh;
@@ -1390,7 +1390,6 @@ button.inventory-metric:hover, button.inventory-metric.selected { border-color: 
   .app-frame.is-sidebar-collapsed .sidebar .nav-item { justify-content: flex-start; gap: 12px; padding: 0 10px; }
   .app-frame.is-sidebar-collapsed .sidebar .nav-item > span:not(.nav-shortcut) { display: inline; }
   .app-frame.is-sidebar-collapsed .sidebar .user-menu { justify-content: flex-start; gap: 9px; padding: 14px 5px 3px; }
-  .sidebar-backdrop { position: fixed; inset: 0; z-index: 30; display: block; border: 0; background: rgba(17, 31, 22, .42); }
   .topbar { position: relative; z-index: 32; }
   .pos-dedicated-header { flex-wrap: wrap; }
   .pos-mobile-nav-toggle { width: 34px; height: 32px; display: inline-flex; order: 5; align-items: center; justify-content: center; flex: 0 0 auto; border: 1px solid rgba(255,255,255,.25); border-radius: 4px; background: transparent; color: #fff; cursor: pointer; }
@@ -1589,4 +1588,85 @@ button.inventory-metric:hover, button.inventory-metric.selected { border-color: 
   .receipt-toolbar label { flex: 1 1 100%; }
   .receipt-toolbar button { flex: 1 1 90px; justify-content: center; }
   .mpesa-payment-card { max-height: calc(100dvh - 32px); }
+}
+
+/* Global push-layout sidebar: the sidebar occupies layout space and never overlays content. */
+.app-frame {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+.app-frame .sidebar {
+  position: relative;
+  inset: auto;
+  z-index: auto;
+  flex: 0 0 0;
+  width: 0;
+  min-width: 0;
+  height: 100vh;
+  height: 100dvh;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 27px 0 15px;
+  border-right: 0;
+  box-shadow: none;
+  transform: none;
+  transition: flex-basis .22s ease, width .22s ease, padding .22s ease, border-color .22s ease;
+}
+.app-frame.is-mobile-nav-open .sidebar {
+  flex-basis: 248px;
+  width: 248px;
+  padding: 27px 17px 15px;
+  border-right: 1px solid var(--line);
+}
+.app-frame .main-area {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+  margin-left: 0;
+  transition: width .22s ease;
+}
+.sidebar-backdrop {
+  display: none !important;
+}
+
+@media (max-width: 790px) {
+  .app-frame {
+    flex-direction: column;
+  }
+  .app-frame .sidebar {
+    order: 0;
+    flex: 0 0 0;
+    width: 100%;
+    min-width: 100%;
+    height: 0;
+    max-height: 0;
+    border-right: 0;
+    border-bottom: 0;
+    transform: none;
+  }
+  .app-frame.is-mobile-nav-open .sidebar {
+    flex-basis: auto;
+    width: 100%;
+    min-width: 100%;
+    height: auto;
+    max-height: min(62vh, 520px);
+    max-height: min(62dvh, 520px);
+    padding: 18px 17px 15px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .app-frame .main-area {
+    order: 1;
+    flex: 1 1 auto;
+    width: 100%;
+  }
+  .app-frame.is-mobile-nav-open .main-area {
+    width: 100%;
+  }
+  .topbar {
+    z-index: auto;
+  }
 }
