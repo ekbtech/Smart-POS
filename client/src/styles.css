@@ -1289,3 +1289,154 @@ button.inventory-metric:hover, button.inventory-metric.selected { border-color: 
   .mpesa-payment-card { padding: 22px 18px; }
   .cash-confirm-overlay, .mpesa-modal-overlay { align-items: start; overflow-y: auto; }
 }
+
+.pos-page.pos-desktop {
+  width: 100%;
+  max-width: none;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 0;
+}
+.pos-desktop .pos-layout {
+  grid-template-rows: minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+}
+.pos-desktop .pos-catalog,
+.pos-desktop .pos-payment-panel {
+  min-width: 0;
+  min-height: 0;
+}
+.pos-desktop .pos-payment-panel {
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+.pos-desktop .pos-payment-heading {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  flex: 0 0 52px;
+}
+.pos-desktop .pos-payment-actions { flex: 0 0 auto; }
+
+@media (max-height: 700px) and (min-width: 981px) {
+  .pos-page.pos-desktop {
+    height: auto;
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+  .pos-desktop .pos-layout {
+    flex: 1 0 480px;
+    min-height: 480px;
+  }
+}
+
+@media (max-width: 980px) {
+  .pos-page.pos-desktop {
+    height: auto;
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+  .pos-desktop .pos-dedicated-header {
+    height: auto;
+    min-height: 56px;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    padding: 7px 10px;
+    gap: 6px 9px;
+  }
+  .pos-desktop .pos-header-brand { order: 0; }
+  .pos-desktop .pos-header-cashier { order: 1; }
+  .pos-desktop .pos-header-shift { order: 2; }
+  .pos-desktop .pos-header-action { order: 3; }
+  .pos-desktop .pos-header-signout { order: 4; }
+  .pos-desktop .pos-mobile-nav-toggle {
+    width: 34px;
+    height: 32px;
+    display: inline-flex;
+    order: 5;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+  }
+  .pos-desktop .pos-workspace-nav {
+    display: none;
+    order: 6;
+    flex: 0 0 100%;
+    width: 100%;
+    height: 34px;
+  }
+  .pos-desktop .pos-workspace-nav.is-open { display: flex; }
+  .pos-desktop .pos-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    flex: 0 0 auto;
+    min-height: 0;
+    gap: 12px;
+    overflow: visible;
+    padding: 12px;
+  }
+  .pos-desktop .pos-catalog {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 0;
+    border-right: 0;
+  }
+  .pos-desktop .pos-sale-table-wrap {
+    flex: 0 0 auto;
+    min-height: 220px;
+    max-height: 55vh;
+    max-height: 55dvh;
+    overflow: auto;
+  }
+  .pos-desktop .pos-actions {
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 7px;
+  }
+  .pos-desktop .pos-actions button { min-height: 42px; }
+  .pos-desktop .pos-held-strip {
+    position: static;
+    width: 100%;
+    max-width: 100%;
+    margin-top: 2px;
+  }
+  .pos-desktop .pos-payment-panel {
+    height: auto;
+    max-height: 80vh;
+    max-height: 80dvh;
+    border: 1px solid #dfe5df;
+    border-radius: 5px;
+  }
+}
+
+@media (max-width: 560px) {
+  .pos-desktop .pos-layout { gap: 10px; padding: 10px; }
+  .pos-desktop .pos-sale-table-wrap { min-height: 190px; }
+  .pos-desktop .pos-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pos-desktop .pos-payment-panel { max-height: 78vh; max-height: 78dvh; }
+  .pos-desktop .pos-payment-grid div { min-width: 0; padding: 9px; }
+  .pos-desktop .pos-payment-input { padding: 10px; }
+  .pos-desktop .pos-payment-methods { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pos-desktop .pos-statusbar {
+    height: auto;
+    min-height: 34px;
+    flex: 0 0 auto;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 5px 8px;
+    padding: 8px 10px;
+  }
+  .pos-desktop .pos-statusbar time { grid-column: 1 / -1; grid-row: 2; }
+  .receipt-dialog { max-height: calc(100dvh - 20px); }
+  .receipt-paper.paper-80 { width: min(80mm, 100%); }
+  .receipt-toolbar { gap: 6px; }
+  .receipt-toolbar label { flex: 1 1 100%; }
+  .receipt-toolbar button { flex: 1 1 90px; justify-content: center; }
+  .mpesa-payment-card { max-height: calc(100dvh - 32px); }
+}
