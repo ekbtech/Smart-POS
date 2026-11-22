@@ -99,9 +99,21 @@ Quantities are decimal strings with up to three fractional digits. Monetary valu
 
 `cashReceived` is the drawer tendered amount and must be at least the calculated total; it is optional for API clients and defaults to the payment allocation total. The difference is recorded as change due. Change cannot be issued against a non-cash payment.
 
-Apply migrations `012_sale_cash_tender.sql` and `013_bank_transfer_verification.sql` before deploying this checkout/receipt update; they add persisted cash tender/change and bank-transfer authorization records.
+Apply migrations `012_sale_cash_tender.sql`, `013_bank_transfer_verification.sql`, and `019_mpesa_payment_requests.sql` before deploying this checkout/receipt update; they add persisted cash tender/change, bank-transfer authorization, and M-Pesa payment/callback records.
 
-Checkout locks the relevant inventory rows and writes the sale, item snapshots, payment, stock movements, and audit event inside one database transaction. A repeated idempotency key returns the original sale. Insufficient stock returns HTTP 409. Cash is enabled. Bank transfer requires an administrator to approve a submitted reference and exact amount after independently verifying it against the bank; checkout consumes that authorization in the same transaction as the sale. M-PESA, card, credit, and split checkout remain unavailable until provider workflows are configured. An initiated or manually referenced external payment must never be treated as paid.
+Checkout locks the relevant inventory rows and writes the sale, item snapshots, payment, stock movements, and audit event inside one database transaction. A repeated idempotency key returns the original sale. Insufficient stock returns HTTP 409. Cash is enabled. Bank transfer requires an administrator to approve a submitted reference and exact amount after independently verifying it against the bank; checkout consumes that authorization in the same transaction as the sale. Split tender supports cash plus an administrator-verified bank transfer. Card remains disabled until a card provider is selected and integrated. An initiated or manually referenced external payment must never be treated as paid.
+
+### Daraja M-Pesa STK Push
+
+- `GET /mpesa/config` — reports whether the server has usable Daraja configuration; it never returns credentials.
+- `POST /mpesa/payments` — creates an STK Push request from the current product IDs, quantities, discount, customer phone (`07XXXXXXXX` or `2547XXXXXXXX`), and a description of at most 13 characters. Requires an open shift and a unique `Idempotency-Key`; returns HTTP 202 with a payment request ID and status.
+- `GET /mpesa/payments/:id` — returns the requesting cashier's payment status. Polling triggers Daraja STK Query verification where possible.
+- `POST /mpesa/payments/:id/cancel` — cancels a failed request after its stock reservation has been released.
+- `POST /mpesa/callback` — unauthenticated Daraja webhook endpoint configured as the public HTTPS callback URL. It stores callback events; a sale is finalized only after server-side Daraja query confirmation and matching callback phone, amount, and transaction code.
+
+M-Pesa requests reserve available inventory while pending. Uncertain provider outcomes retain the reservation and must be reconciled before another payment is taken; do not retry an unknown request. Daraja STK Push accepts whole Kenyan shillings, so totals containing cents are rejected rather than rounded. The integration is inactive until the server environment contains `MPESA_ENVIRONMENT` (`sandbox` or `production`), `MPESA_CONSUMER_KEY`, `MPESA_CONSUMER_SECRET`, `MPESA_SHORTCODE`, `MPESA_PASSKEY`, and a reachable HTTPS `MPESA_CALLBACK_URL` ending in `/api/mpesa/callback`. Optionally set `MPESA_TRANSACTION_TYPE`. Never expose these values as `VITE_*` variables. Use the provider sandbox and verify the callback path from outside the local network before production.
+
+The receipt preview offers printing and browser **Save as PDF** through the print dialog. Set `RECEIPT_BUSINESS_NAME`, `RECEIPT_BUSINESS_PHONE`, `RECEIPT_BUSINESS_ADDRESS`, and optionally `RECEIPT_LOGO_URL` on the server to customize receipt branding.
 
 Checkout requires an open cashier shift for the signed-in user. Start one with `POST /shifts/open` before using the POS.
 

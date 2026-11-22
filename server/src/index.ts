@@ -44,6 +44,10 @@ import {
   revokeRegistrationScannerPairing, revokeScannerPairing,
   scannerAckSchema, scannerPairSchema, scannerScanSchema, submitScannerBarcode,
 } from "./mobile-scanner.js";
+import {
+  cancelFailedMpesaPayment, getMpesaAvailability, getMpesaPaymentStatus, mpesaPaymentRequestSchema,
+  receiveMpesaCallback, startMpesaPayment,
+} from "./mpesa.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 4000);
@@ -89,6 +93,7 @@ app.use((req, res, next) => {
 
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: "draft-8", legacyHeaders: false });
 const productLookupLimiter = rateLimit({ windowMs: 60 * 1000, limit: 20, standardHeaders: "draft-8", legacyHeaders: false });
+const mpesaCallbackLimiter = rateLimit({ windowMs: 60 * 1000, limit: 120, standardHeaders: "draft-8", legacyHeaders: false });
 
 function positiveId(value: string | string[] | undefined): number | undefined {
   if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) return undefined;
@@ -1232,6 +1237,44 @@ app.post("/api/bank-transfer-verifications/:id/decision", authenticate, requireR
   }
 });
 
+app.get("/api/mpesa/config", authenticate, authenticatePos, requireModule("pos"), (_req, res) => {
+  res.json({ mpesa: getMpesaAvailability() });
+});
+
+app.post("/api/mpesa/payments", authenticate, authenticatePos, requireModule("pos"), requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+  const idempotencyKey = req.header("Idempotency-Key")?.trim();
+  if (!idempotencyKey || idempotencyKey.length > 100) {
+    res.status(400).json({ error: "A valid Idempotency-Key header is required." });
+    return;
+  }
+  try {
+    const input = mpesaPaymentRequestSchema.parse(req.body);
+    void startMpesaPayment(input, idempotencyKey, req.user!).then(
+      (payment) => res.status(202).json({ payment }),
+      next,
+    );
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/mpesa/payments/:id", authenticate, authenticatePos, requireModule("pos"), requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+  const id = typeof req.params.id === "string" ? req.params.id : "";
+  void getMpesaPaymentStatus(id, req.user!).then((payment) => res.json({ payment }), next);
+});
+
+app.post("/api/mpesa/payments/:id/cancel", authenticate, authenticatePos, requireModule("pos"), requireRoles("admin", "manager", "cashier"), (req, res, next) => {
+  const id = typeof req.params.id === "string" ? req.params.id : "";
+  void cancelFailedMpesaPayment(id, req.user!).then((payment) => res.json({ payment }), next);
+});
+
+app.post("/api/mpesa/callback", mpesaCallbackLimiter, (req, res, next) => {
+  void receiveMpesaCallback(req.body).then(
+    () => res.json({ ResultCode: 0, ResultDesc: "Accepted" }),
+    next,
+  );
+});
+
 app.get("/api/sales/:id", authenticate, requireModule("sales"), async (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid sale ID." }); return; }
@@ -1273,6 +1316,12 @@ app.get("/api/sales/:id", authenticate, requireModule("sales"), async (req, res,
         status: sales[0].status, createdAt: sales[0].created_at.toISOString(),
         cashier: sales[0].cashier, customer: sales[0].customer_name, branch: sales[0].branch_name,
         cashReceived: sales[0].cash_received, changeDue: sales[0].change_due,
+      },
+      business: {
+        name: process.env.RECEIPT_BUSINESS_NAME?.trim() || "Checonex",
+        phone: process.env.RECEIPT_BUSINESS_PHONE?.trim() || "0723037557",
+        address: process.env.RECEIPT_BUSINESS_ADDRESS?.trim() || "Eldama Ravine / Kabarnet",
+        logoUrl: process.env.RECEIPT_LOGO_URL?.trim() || null,
       },
       items: items.map((item) => ({
         id: item.id, productId: item.product_id, sku: item.sku_snapshot, name: item.name_snapshot,

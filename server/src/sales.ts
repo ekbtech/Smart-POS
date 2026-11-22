@@ -31,12 +31,13 @@ export const saleSchema = z.object({
   }).strict()).min(1).max(5),
 }).strict().superRefine((sale, context) => {
   if (sale.cashReceived !== undefined) {
-    const allocated = sale.payments.reduce((sum, payment) => sum.plus(payment.amount), new Decimal(0));
+    const allocated = sale.payments
+      .filter((payment) => payment.method === "cash")
+      .reduce((sum, payment) => sum.plus(payment.amount), new Decimal(0));
     if (new Decimal(sale.cashReceived).lessThan(allocated)) {
-      context.addIssue({ code: "custom", path: ["cashReceived"], message: "Amount received cannot be less than the payment total." });
+      context.addIssue({ code: "custom", path: ["cashReceived"], message: "Amount received cannot be less than the cash payment." });
     }
-    if (new Decimal(sale.cashReceived).greaterThan(allocated)
-      && sale.payments.some((payment) => payment.method !== "cash")) {
+    if (new Decimal(sale.cashReceived).greaterThan(allocated) && allocated.isZero()) {
       context.addIssue({ code: "custom", path: ["cashReceived"], message: "Change can only be issued for cash payments." });
     }
   }
@@ -44,13 +45,29 @@ export const saleSchema = z.object({
     if (payment.method === "bank_transfer" && !payment.providerReference) {
       context.addIssue({ code: "custom", path: ["payments"], message: "A bank transfer reference is required." });
     }
-    if (payment.method !== "bank_transfer" && payment.providerReference) {
-      context.addIssue({ code: "custom", path: ["payments"], message: "Payment references are only accepted for bank transfers." });
+    if (payment.method !== "bank_transfer" && payment.method !== "mpesa" && payment.providerReference) {
+      context.addIssue({ code: "custom", path: ["payments"], message: "Payment references are only accepted for verified provider payments." });
     }
   }
 });
 
-type SaleInput = z.infer<typeof saleSchema>;
+export type SaleInput = z.infer<typeof saleSchema>;
+export type VerifiedMpesaPayment = {
+  reference: string;
+  amount: string;
+  shiftId: number;
+  priceSnapshots: Array<{
+    productId: number;
+    unitPrice: string;
+    taxRate: string;
+    unitCost: string | null;
+  }>;
+  reservations: Array<{
+    productId: number;
+    quantity: string;
+    allocations: Array<{ batchId: number; quantity: string }>;
+  }>;
+};
 export const bankTransferVerificationRequestSchema = z.object({
   reference: paymentReference,
   amount: positiveMoney,
@@ -287,13 +304,30 @@ async function findExistingSale(connection: PoolConnection, branchId: number, ke
   } : undefined;
 }
 
-export async function createSale(input: SaleInput, idempotencyKey: string, user: AuthUser): Promise<SavedSale> {
+export async function createSale(
+  input: SaleInput,
+  idempotencyKey: string,
+  user: AuthUser,
+  verifiedMpesa?: VerifiedMpesaPayment,
+): Promise<SavedSale> {
   const bankTransferPayments = input.payments.filter((payment) => payment.method === "bank_transfer");
-  if (input.payments.some((payment) => payment.method !== "cash" && payment.method !== "bank_transfer")) {
+  const mpesaPayments = input.payments.filter((payment) => payment.method === "mpesa");
+  if (mpesaPayments.length && !verifiedMpesa) {
+    throw new HttpError(501, "M-Pesa payments require a verified Safaricom callback.");
+  }
+  if (verifiedMpesa && (
+    mpesaPayments.length !== 1
+    || input.payments.some((payment) => payment.method !== "cash" && payment.method !== "mpesa")
+    || mpesaPayments[0]?.providerReference !== verifiedMpesa.reference
+    || !new Decimal(mpesaPayments[0]?.amount ?? "0").equals(verifiedMpesa.amount)
+  )) {
+    throw new HttpError(400, "The verified M-Pesa payment does not match this sale.");
+  }
+  if (input.payments.some((payment) => payment.method !== "cash" && payment.method !== "bank_transfer" && payment.method !== "mpesa")) {
     throw new HttpError(501, "This payment method is not enabled until its provider verification workflow is configured.");
   }
-  if (bankTransferPayments.length && input.payments.length !== 1) {
-    throw new HttpError(400, "Bank transfer cannot be split with another payment method.");
+  if (bankTransferPayments.length > 1 || (bankTransferPayments.length && mpesaPayments.length)) {
+    throw new HttpError(400, "Only one non-cash payment can be combined with cash.");
   }
 
   try {
@@ -302,8 +336,10 @@ export async function createSale(input: SaleInput, idempotencyKey: string, user:
       if (replay) return replay;
 
       const [shifts] = await connection.execute<Array<RowDataPacket & { id: number }>>(
-        "SELECT id FROM cashier_shifts WHERE branch_id = ? AND cashier_id = ? AND status = 'open' FOR UPDATE",
-        [user.branchId, user.id],
+        verifiedMpesa
+          ? "SELECT id FROM cashier_shifts WHERE id = ? AND branch_id = ? AND cashier_id = ? AND status = 'open' FOR UPDATE"
+          : "SELECT id FROM cashier_shifts WHERE branch_id = ? AND cashier_id = ? AND status = 'open' FOR UPDATE",
+        verifiedMpesa ? [verifiedMpesa.shiftId, user.branchId, user.id] : [user.branchId, user.id],
       );
       const shiftId = shifts[0]?.id;
       if (!shiftId) throw new HttpError(409, "Open a cashier shift before completing a sale.");
@@ -325,6 +361,7 @@ export async function createSale(input: SaleInput, idempotencyKey: string, user:
       const requestedIds = input.items.map((item) => item.productId).sort((a, b) => a - b);
       const productById = new Map<number, ProductRow>();
       const batchesByProduct = new Map<number, ProductBatch[]>();
+      const priceSnapshots = new Map(verifiedMpesa?.priceSnapshots.map((snapshot) => [snapshot.productId, snapshot]) ?? []);
       for (const productId of requestedIds) {
         const [activeProducts] = await connection.execute<Array<RowDataPacket & { id: number }>>(
           "SELECT id FROM products WHERE id = ? AND is_active = TRUE",
@@ -342,7 +379,13 @@ export async function createSale(input: SaleInput, idempotencyKey: string, user:
           [user.branchId, productId],
         );
         if (!rows[0]) throw new HttpError(404, `Product ${productId} is unavailable.`);
-        productById.set(productId, rows[0]);
+        const priceSnapshot = priceSnapshots.get(productId);
+        productById.set(productId, priceSnapshot ? {
+          ...rows[0],
+          selling_price: priceSnapshot.unitPrice,
+          tax_rate: priceSnapshot.taxRate,
+          purchase_price: priceSnapshot.unitCost,
+        } : rows[0]);
         const [batches] = await connection.execute<ProductBatch[]>(
           `SELECT id, quantity_remaining, DATE_FORMAT(expiry_date, '%Y-%m-%d') AS expiry_date
            FROM inventory_batches
@@ -360,12 +403,26 @@ export async function createSale(input: SaleInput, idempotencyKey: string, user:
       const lines = input.items.map((item, index) => {
         const product = productById.get(item.productId)!;
         const count = new Decimal(item.quantity);
-        const available = new Decimal(product.on_hand).minus(product.reserved);
-        const canOversell = allowNegativeStock && new Decimal(product.reserved).isZero();
+        const reservation = verifiedMpesa?.reservations.find((entry) => entry.productId === product.id);
+        const reservedQuantity = new Decimal(reservation?.quantity ?? "0");
+        const available = new Decimal(product.on_hand).minus(product.reserved).plus(reservedQuantity);
+        const canOversell = allowNegativeStock
+          && new Decimal(product.reserved).minus(reservedQuantity).isZero();
         if (count.greaterThan(available) && !canOversell) {
           throw new HttpError(409, `Insufficient stock for ${product.name}; ${available.toFixed(3)} available.`);
         }
-        const batchAllocation = allocateSaleBatches(batchesByProduct.get(product.id) ?? [], item.quantity);
+        const batchAllocation = reservation
+          ? {
+            allocations: reservation.allocations.map((allocation) => ({
+              batchId: allocation.batchId,
+              quantity: new Decimal(allocation.quantity),
+            })),
+            unallocated: count.minus(reservation.allocations.reduce(
+              (sum, allocation) => sum.plus(allocation.quantity),
+              new Decimal(0),
+            )),
+          }
+          : allocateSaleBatches(batchesByProduct.get(product.id) ?? [], item.quantity);
         if (batchAllocation.unallocated.greaterThan(0) && !canOversell) {
           const eligible = count.minus(batchAllocation.unallocated);
           throw new HttpError(409, `Only ${eligible.toFixed(3)} unexpired batch units are available for ${product.name}.`);
@@ -379,6 +436,9 @@ export async function createSale(input: SaleInput, idempotencyKey: string, user:
         new Decimal(0),
       ).toDecimalPlaces(2);
       if (!paymentTotal.equals(total)) throw new HttpError(400, `Payments must equal the total of KES ${total.toFixed(2)}.`);
+      if (verifiedMpesa && !paymentTotal.equals(verifiedMpesa.amount)) {
+        throw new HttpError(400, "The verified M-Pesa amount does not match the sale total.");
+      }
       let bankTransferVerificationId: number | null = null;
       const bankTransfer = bankTransferPayments[0];
       if (bankTransfer) {
@@ -400,16 +460,21 @@ export async function createSale(input: SaleInput, idempotencyKey: string, user:
         }
         bankTransferVerificationId = verification.id;
       }
+      const cashPayments = input.payments.filter((payment) => payment.method === "cash");
+      const cashApplied = cashPayments.reduce(
+        (sum, payment) => sum.plus(new Decimal(payment.amount)),
+        new Decimal(0),
+      ).toDecimalPlaces(2);
       const cashReceived = input.cashReceived === undefined
-        ? paymentTotal
+        ? cashApplied
         : new Decimal(input.cashReceived).toDecimalPlaces(2);
-      if (cashReceived.lessThan(paymentTotal)) {
-        throw new HttpError(400, "Amount received cannot be less than the sale total.");
+      if (cashReceived.lessThan(cashApplied)) {
+        throw new HttpError(400, "Amount received cannot be less than the cash payment.");
       }
-      if (cashReceived.greaterThan(paymentTotal) && input.payments.some((payment) => payment.method !== "cash")) {
+      if (cashReceived.greaterThan(cashApplied) && cashApplied.isZero()) {
         throw new HttpError(400, "Change can only be issued for cash payments.");
       }
-      const changeDue = cashReceived.minus(paymentTotal).toDecimalPlaces(2);
+      const changeDue = cashReceived.minus(cashApplied).toDecimalPlaces(2);
 
       const receiptNumber = `SP-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${randomUUID().slice(0, 8).toUpperCase()}`;
       const [saleResult] = await connection.execute(
@@ -418,7 +483,7 @@ export async function createSale(input: SaleInput, idempotencyKey: string, user:
         [
           user.branchId, user.id, input.customerId ?? null, shiftId, receiptNumber, idempotencyKey,
           subtotal.toFixed(2), discount.toFixed(2), taxTotal.toFixed(2), total.toFixed(2),
-          "completed", cashReceived.toFixed(2), changeDue.toFixed(2),
+          "completed", cashPayments.length ? cashReceived.toFixed(2) : null, changeDue.toFixed(2),
         ],
       );
       const saleId = (saleResult as { insertId: number }).insertId;
@@ -437,19 +502,34 @@ export async function createSale(input: SaleInput, idempotencyKey: string, user:
         );
         const saleItemId = (itemResult as { insertId: number }).insertId;
         for (const allocation of line.allocations) {
-          await connection.execute(
-            "UPDATE inventory_batches SET quantity_remaining = quantity_remaining - ? WHERE id = ?",
-            [allocation.quantity.toFixed(3), allocation.batchId],
-          );
+          if (!verifiedMpesa) {
+            await connection.execute(
+              "UPDATE inventory_batches SET quantity_remaining = quantity_remaining - ? WHERE id = ?",
+              [allocation.quantity.toFixed(3), allocation.batchId],
+            );
+          }
           await connection.execute(
             "INSERT INTO sale_item_batches (sale_item_id, inventory_batch_id, quantity) VALUES (?, ?, ?)",
             [saleItemId, allocation.batchId, allocation.quantity.toFixed(3)],
           );
         }
-        await connection.execute(
-          "UPDATE inventory SET on_hand = on_hand - ? WHERE branch_id = ? AND product_id = ?",
-          [line.item.quantity, user.branchId, line.product.id],
-        );
+        if (verifiedMpesa) {
+          const reservation = verifiedMpesa.reservations.find((entry) => entry.productId === line.product.id);
+          const reservedQuantity = new Decimal(reservation?.quantity ?? "0");
+          const [updated] = await connection.execute(
+            `UPDATE inventory SET on_hand = on_hand - ?, reserved = reserved - ?
+             WHERE branch_id = ? AND product_id = ? AND reserved >= ?`,
+            [line.item.quantity, reservedQuantity.toFixed(3), user.branchId, line.product.id, reservedQuantity.toFixed(3)],
+          );
+          if ((updated as { affectedRows: number }).affectedRows !== 1) {
+            throw new HttpError(409, `The stock reservation for ${line.product.name} is no longer available.`);
+          }
+        } else {
+          await connection.execute(
+            "UPDATE inventory SET on_hand = on_hand - ? WHERE branch_id = ? AND product_id = ?",
+            [line.item.quantity, user.branchId, line.product.id],
+          );
+        }
         await connection.execute(
           `INSERT INTO stock_movements (branch_id, product_id, sale_id, movement_type, quantity, reference, created_by)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -484,7 +564,7 @@ export async function createSale(input: SaleInput, idempotencyKey: string, user:
       );
       return {
         id: saleId, receiptNumber, subtotal: subtotal.toFixed(2), discount: discount.toFixed(2),
-        tax: taxTotal.toFixed(2), total: total.toFixed(2), cashReceived: cashReceived.toFixed(2),
+        tax: taxTotal.toFixed(2), total: total.toFixed(2), cashReceived: cashPayments.length ? cashReceived.toFixed(2) : null,
         changeDue: changeDue.toFixed(2), status: "completed",
         replayed: false,
       };

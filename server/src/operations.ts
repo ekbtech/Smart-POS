@@ -1172,6 +1172,15 @@ export async function closeShift(input: z.infer<typeof closeShiftSchema>, user: 
     );
     const shift = shifts[0];
     if (!shift) throw new HttpError(409, "There is no open cashier shift.");
+    const [pendingMpesaPayments] = await connection.execute<Array<RowDataPacket & { id: string }>>(
+      `SELECT id FROM mpesa_payment_requests
+       WHERE shift_id = ? AND status IN ('created', 'requesting', 'pending', 'verifying', 'unknown')
+       LIMIT 1 FOR UPDATE`,
+      [shift.id],
+    );
+    if (pendingMpesaPayments.length) {
+      throw new HttpError(409, "Resolve the pending M-Pesa payment before closing this shift.");
+    }
     const [cashSales] = await connection.execute<Array<RowDataPacket & { amount: string }>>(
       `SELECT COALESCE(SUM(sp.amount), 0) AS amount FROM sale_payments sp
        JOIN sales s ON s.id = sp.sale_id

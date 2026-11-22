@@ -1,0 +1,46 @@
+CREATE TABLE mpesa_payment_requests (
+  id CHAR(36) NOT NULL PRIMARY KEY,
+  branch_id BIGINT UNSIGNED NOT NULL,
+  cashier_id BIGINT UNSIGNED NOT NULL,
+  shift_id BIGINT UNSIGNED NOT NULL,
+  idempotency_key VARCHAR(100) NOT NULL,
+  status ENUM('created', 'requesting', 'pending', 'verifying', 'succeeded', 'failed', 'unknown', 'cancelled')
+    NOT NULL DEFAULT 'created',
+  phone VARCHAR(12) NOT NULL,
+  description VARCHAR(13) NOT NULL,
+  amount DECIMAL(12,2) NOT NULL,
+  sale_input JSON NOT NULL,
+  price_snapshots JSON NOT NULL,
+  reservations JSON NOT NULL,
+  merchant_request_id VARCHAR(100) NULL,
+  checkout_request_id VARCHAR(100) NULL,
+  mpesa_receipt_number VARCHAR(32) NULL,
+  sale_id BIGINT UNSIGNED NULL,
+  error_message VARCHAR(255) NULL,
+  last_checked_at DATETIME NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_mpesa_branch_idempotency (branch_id, idempotency_key),
+  UNIQUE KEY uq_mpesa_checkout_request (checkout_request_id),
+  UNIQUE KEY uq_mpesa_receipt_number (mpesa_receipt_number),
+  INDEX idx_mpesa_status (status, updated_at),
+  INDEX idx_mpesa_cashier (branch_id, cashier_id, created_at),
+  CONSTRAINT fk_mpesa_branch FOREIGN KEY (branch_id) REFERENCES branches(id),
+  CONSTRAINT fk_mpesa_cashier FOREIGN KEY (cashier_id) REFERENCES users(id),
+  CONSTRAINT fk_mpesa_shift FOREIGN KEY (shift_id) REFERENCES cashier_shifts(id),
+  CONSTRAINT fk_mpesa_sale FOREIGN KEY (sale_id) REFERENCES sales(id),
+  CONSTRAINT chk_mpesa_amount CHECK (amount > 0)
+) ENGINE=InnoDB;
+
+CREATE TABLE mpesa_callback_events (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  checkout_request_id VARCHAR(100) NOT NULL,
+  merchant_request_id VARCHAR(100) NOT NULL,
+  result_code INT NOT NULL,
+  result_description VARCHAR(255) NOT NULL,
+  metadata JSON NULL,
+  received_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  processed_at DATETIME NULL,
+  INDEX idx_mpesa_callback_request (checkout_request_id, result_code, received_at),
+  INDEX idx_mpesa_callback_received (received_at)
+) ENGINE=InnoDB;

@@ -49,6 +49,18 @@ describe("sale validation", () => {
     }).success).toBe(false);
   });
 
+  it("allows a cash and bank-transfer split with cash tender checked against the cash portion", () => {
+    const split = {
+      items: [{ productId: 3, quantity: "1" }],
+      payments: [
+        { method: "cash", amount: "20.00" },
+        { method: "bank_transfer", amount: "30.00", providerReference: "BANK-REF-002" },
+      ],
+    };
+    expect(saleSchema.safeParse({ ...split, cashReceived: "25.00" }).success).toBe(true);
+    expect(saleSchema.safeParse({ ...split, cashReceived: "19.99" }).success).toBe(false);
+  });
+
   it("requires a reference for bank-transfer checkout", () => {
     const sale = {
       items: [{ productId: 3, quantity: "1" }],

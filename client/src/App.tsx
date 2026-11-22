@@ -34,11 +34,21 @@ type SaleReceipt = {
     total: string; status: string; createdAt: string; cashier: string; customer: string | null;
     branch: string; cashReceived: string | null; changeDue: string;
   };
+  business: { name: string; phone: string; address: string; logoUrl: string | null };
   items: Array<{ id: number; sku: string; name: string; quantity: string; unitPrice: string; lineTotal: string }>;
   payments: Array<{ method: string; amount: string; status: string; reference: string | null }>;
 };
 type BankTransferVerification = {
   id: number; amount: string; status: "pending" | "verified" | "rejected" | "used";
+};
+type MpesaPayment = {
+  id: string;
+  status: "created" | "requesting" | "pending" | "verifying" | "succeeded" | "failed" | "unknown" | "cancelled";
+  amount: string;
+  description: string;
+  saleId: number | null;
+  receiptNumber: string | null;
+  error: string | null;
 };
 const aggregateCartItems = (items: PosCartLine[]) => {
   const quantities = new Map<number, number>();
@@ -2086,11 +2096,18 @@ function ReceiptDialog({
       <div className="receipt-toolbar no-print">
         <label>Paper size<select value={width} onChange={(event) => onWidthChange(event.target.value as "58mm" | "80mm")}><option value="58mm">58 mm</option><option value="80mm">80 mm</option></select></label>
         <button onClick={printReceipt}><Printer size={16} /> Print</button>
-        <button onClick={printReceipt}><Download size={16} /> Save as PDF</button>
+        <button onClick={printReceipt}><Download size={16} /> Print / Save PDF</button>
         <button className="receipt-close" onClick={onClose}>Close</button>
       </div>
       <article className={`receipt-paper paper-${width === "58mm" ? "58" : "80"}`}>
-        <header className="receipt-brand"><span className="brand-mark">s</span><strong>Smart POS</strong><small>{receipt.sale.branch}</small></header>
+        <header className="receipt-brand">
+          {receipt.business.logoUrl
+            ? <img className="receipt-logo" src={receipt.business.logoUrl} alt={`${receipt.business.name} logo`} />
+            : <span className="receipt-business-mark">{receipt.business.name.slice(0, 1).toUpperCase()}</span>}
+          <strong>{receipt.business.name}</strong>
+          <small>{receipt.sale.branch}</small>
+          <small>{receipt.business.phone} · {receipt.business.address}</small>
+        </header>
         <div className="receipt-meta">
           <div><span>RECEIPT</span><strong>{receipt.sale.receiptNumber}</strong></div>
           <div><span>TRANSACTION</span><strong>#{receipt.sale.id}</strong></div>
@@ -2110,7 +2127,7 @@ function ReceiptDialog({
         <div className="receipt-payment">
           <strong>PAYMENT</strong>
           {receipt.payments.map((payment, index) => <div key={`${payment.method}-${index}`}><span>{payment.method.replaceAll("_", " ").toUpperCase()}</span><strong>{money(payment.amount)}</strong>{payment.reference && <small>Ref: {payment.reference}</small>}</div>)}
-          <div><span>Amount received</span><strong>{money(receipt.sale.cashReceived ?? receipt.sale.total)}</strong></div>
+          {receipt.payments.some((payment) => payment.method === "cash") && <div><span>Amount received</span><strong>{money(receipt.sale.cashReceived ?? receipt.sale.total)}</strong></div>}
           {Number(receipt.sale.changeDue) > 0 && <div><span>Change</span><strong>{money(receipt.sale.changeDue)}</strong></div>}
         </div>
         <footer className="receipt-thanks">Thank you for shopping with us!</footer>
@@ -2701,8 +2718,15 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const [amountPaid, setAmountPaid] = useState("");
   const [receipt, setReceipt] = useState<SaleReceipt | null>(null);
   const [receiptWidth, setReceiptWidth] = useState<"58mm" | "80mm">("80mm");
-  const [paymentMethod, setPaymentMethod] = useState<"cash" | "bank_transfer">("cash");
+  const [paymentMethod, setPaymentMethod] = useState<"cash" | "bank_transfer" | "mpesa" | "split">("cash");
   const [bankReference, setBankReference] = useState("");
+  const [cashAllocation, setCashAllocation] = useState("");
+  const [cashConfirmOpen, setCashConfirmOpen] = useState(false);
+  const [mpesaDialogOpen, setMpesaDialogOpen] = useState(false);
+  const [mpesaPhone, setMpesaPhone] = useState("");
+  const [mpesaDescription, setMpesaDescription] = useState("Retail purchase");
+  const [mpesaPaymentId, setMpesaPaymentId] = useState<string | null>(null);
+  const [mpesaError, setMpesaError] = useState("");
   const [bankVerification, setBankVerification] = useState<{
     id: number; amount: string; status: "pending" | "verified" | "rejected" | "used";
   } | null>(null);
@@ -2720,6 +2744,8 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const isAddingProductRef = useRef(false);
   const scanInputRef = useRef({ value: "", lastInputAt: 0, rapidCharacters: 0 });
   const idempotencyRef = useRef<string | null>(null);
+  const mpesaIdempotencyRef = useRef<string | null>(null);
+  const mpesaReceiptLoadedRef = useRef<number | null>(null);
   const processedPhoneScansRef = useRef(new Set<string>());
   const phoneScanAcknowledgementsRef = useRef(new Map<string, {
     status: "added" | "unknown" | "rejected" | "error";
@@ -2737,6 +2763,12 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const activeShift = useQuery({
     queryKey: ["active-shift"],
     queryFn: async () => (await api.get<{ shift: { id: number; openingCash: string; openedAt: string; branchName: string } | null }>("/shifts/active")).data.shift,
+  });
+  const mpesaConfigQuery = useQuery({
+    queryKey: ["mpesa-config"],
+    queryFn: async () => (await api.get<{ mpesa: { configured: boolean; reason: string | null; requiresWholeShillings: boolean } }>("/mpesa/config")).data.mpesa,
+    staleTime: 60_000,
+    retry: false,
   });
   const shiftSummary = useQuery({
     queryKey: ["shift-close-summary"],
@@ -2832,7 +2864,9 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const requestBankVerification = useMutation({
     mutationFn: async () => (await api.post<{ verification: BankTransferVerification }>("/bank-transfer-verifications", {
       reference: bankReference.trim(),
-      amount: fromCents(payableCents),
+      amount: fromCents(paymentMethod === "split"
+        ? payableCents - Math.round((Number(cashAllocation) || 0) * 100)
+        : payableCents),
     })).data.verification,
     onSuccess: (verification) => {
       setBankVerification(verification);
@@ -2851,15 +2885,23 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const checkout = useMutation({
     mutationFn: async () => {
       if (!idempotencyRef.current) idempotencyRef.current = crypto.randomUUID();
-      const body = {
-        items: aggregateCartItems(cart),
-        discount: fromCents(discountAmountCents),
-        cashReceived: paymentMethod === "cash" ? amountPaid : fromCents(payableCents),
-        payments: [{
+      const cashAmountCents = Math.round((Number(cashAllocation) || 0) * 100);
+      const bankAmountCents = payableCents - cashAmountCents;
+      const payments = paymentMethod === "split"
+        ? [
+          { method: "cash" as const, amount: fromCents(cashAmountCents) },
+          { method: "bank_transfer" as const, amount: fromCents(bankAmountCents), providerReference: bankReference.trim() },
+        ]
+        : [{
           method: paymentMethod,
           amount: fromCents(payableCents),
           ...(paymentMethod === "bank_transfer" ? { providerReference: bankReference.trim() } : {}),
-        }],
+        }];
+      const body = {
+        items: aggregateCartItems(cart),
+        discount: fromCents(discountAmountCents),
+        ...(["cash", "split"].includes(paymentMethod) ? { cashReceived: amountPaid } : {}),
+        payments,
       };
       return (await api.post<{ sale: { id: number; receiptNumber: string; total: string; status: string } }>("/sales", body, {
         headers: { "Idempotency-Key": idempotencyRef.current },
@@ -2872,9 +2914,14 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       setAmountPaid("");
       setPaymentMethod("cash");
       setBankReference("");
+      setCashAllocation("");
       setBankVerification(null);
+      setMpesaPaymentId(null);
+      mpesaIdempotencyRef.current = null;
+      mpesaReceiptLoadedRef.current = null;
       setCheckoutError("");
       idempotencyRef.current = null;
+      setCashConfirmOpen(false);
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       void queryClient.invalidateQueries({ queryKey: ["products"] });
       void queryClient.invalidateQueries({ queryKey: ["sales"] });
@@ -2887,6 +2934,77 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     },
     onError: (error) => setCheckoutError(getErrorMessage(error)),
   });
+  const requestMpesaPayment = useMutation({
+    mutationFn: async () => {
+    if (!mpesaIdempotencyRef.current) mpesaIdempotencyRef.current = crypto.randomUUID();
+    return (await api.post<{ payment: MpesaPayment }>("/mpesa/payments", {
+      items: aggregateCartItems(cart),
+      discount: fromCents(discountAmountCents),
+      phone: mpesaPhone.trim(),
+      description: mpesaDescription.trim(),
+    }, { headers: { "Idempotency-Key": mpesaIdempotencyRef.current } })).data.payment;
+    },
+    onSuccess: (payment) => {
+    setMpesaPaymentId(payment.id);
+    setMpesaError("");
+    setCheckoutError("");
+    },
+    onError: (error) => setMpesaError(getErrorMessage(error)),
+  });
+  const mpesaPaymentQuery = useQuery({
+    queryKey: ["mpesa-payment", mpesaPaymentId],
+    queryFn: async () => (await api.get<{ payment: MpesaPayment }>(`/mpesa/payments/${mpesaPaymentId}`)).data,
+    enabled: Boolean(mpesaPaymentId),
+    refetchInterval: (query) => ["succeeded", "failed", "cancelled", "unknown"].includes(query.state.data?.payment.status ?? "")
+    ? false
+    : 2_500,
+    retry: false,
+  });
+  const mpesaStatus = mpesaPaymentQuery.data?.payment.status;
+  const mpesaPaymentUnresolved = Boolean(mpesaPaymentId)
+    && !["succeeded", "failed", "cancelled"].includes(mpesaStatus ?? "");
+  const cancelMpesaPayment = useMutation({
+    mutationFn: async () => (await api.post(`/mpesa/payments/${mpesaPaymentId}/cancel`)).data,
+    onSuccess: () => {
+    setMpesaPaymentId(null);
+    mpesaIdempotencyRef.current = null;
+    setMpesaError("");
+    setMpesaDialogOpen(false);
+    setPaymentMethod("cash");
+    },
+    onError: (error) => setMpesaError(getErrorMessage(error)),
+  });
+  const loadMpesaReceipt = async (saleId: number) => {
+    try {
+      const { data } = await api.get<SaleReceipt>(`/sales/${saleId}`);
+      setReceipt(data);
+      setToast(`Sale ${data.sale.receiptNumber} completed · ${money(data.sale.total)}`);
+      setCart([]);
+      setSaleDiscount("0.00");
+      setAmountPaid("");
+      setPaymentMethod("cash");
+      setBankReference("");
+      setCashAllocation("");
+      setBankVerification(null);
+      setMpesaDialogOpen(false);
+      setMpesaPaymentId(null);
+      mpesaIdempotencyRef.current = null;
+      idempotencyRef.current = null;
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      void queryClient.invalidateQueries({ queryKey: ["products"] });
+      void queryClient.invalidateQueries({ queryKey: ["sales"] });
+    } catch (error) {
+      mpesaReceiptLoadedRef.current = null;
+      setCheckoutError(`M-Pesa was confirmed, but the receipt could not be loaded: ${getErrorMessage(error)}`);
+    }
+  };
+  useEffect(() => {
+    const payment = mpesaPaymentQuery.data?.payment;
+    if (payment?.status === "succeeded" && payment.saleId && mpesaReceiptLoadedRef.current !== payment.saleId) {
+      mpesaReceiptLoadedRef.current = payment.saleId;
+      void loadMpesaReceipt(payment.saleId);
+    }
+  }, [mpesaPaymentQuery.data?.payment.status, mpesaPaymentQuery.data?.payment.saleId]);
   const retrieveHeldSaleMutation = useMutation({
     mutationFn: (id: number) => api.post<{ sale: {
       items: Array<{ productId: number; quantity: string }>;
@@ -2909,6 +3027,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   });
 
   const addProduct = (product: Product) => {
+    if (mpesaPaymentUnresolved) return false;
     if (Number(product.stock) < 1) {
       setCheckoutError(`${product.name} is out of stock.`);
       return false;
@@ -2930,6 +3049,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     return true;
   };
   useEffect(() => {
+    if (mpesaPaymentUnresolved) return;
     const pending = (phoneScannerQuery.data?.scans ?? [])
       .filter((scan) => !processedPhoneScansRef.current.has(scan.id)
         || phoneScanAcknowledgementsRef.current.has(scan.id))
@@ -2981,7 +3101,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       }
       void queryClient.invalidateQueries({ queryKey: ["phone-scanner", phonePairing.id] });
     })();
-  }, [phoneScannerQuery.data, phonePairing, cart, queryClient]);
+  }, [phoneScannerQuery.data, phonePairing, cart, queryClient, mpesaPaymentUnresolved]);
   const scan = async (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "ArrowDown") {
       event.preventDefault();
@@ -3086,13 +3206,49 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     return taxable + Math.round(taxable * Number(item.product.taxRate) / 100);
   };
   const amountPaidCents = Math.round((Number(amountPaid) || 0) * 100);
+  const cashAllocationCents = Math.round((Number(cashAllocation) || 0) * 100);
+  const bankAllocationCents = paymentMethod === "split" ? payableCents - cashAllocationCents : payableCents;
   const balanceCents = Math.max(0, payableCents - amountPaidCents);
   const changeCents = Math.max(0, amountPaidCents - payableCents);
-  const bankTransferApprovedForTotal = bankVerification?.status === "verified"
-    && bankVerification.amount === fromCents(payableCents);
+  const cashShareBalanceCents = Math.max(0, cashAllocationCents - amountPaidCents);
+  const cashShareChangeCents = Math.max(0, amountPaidCents - cashAllocationCents);
+  const bankTransferApprovedForAmount = bankVerification?.status === "verified"
+    && bankVerification.amount === fromCents(bankAllocationCents);
   const canCompletePayment = paymentMethod === "cash"
     ? Boolean(amountPaid.trim()) && amountPaidCents >= payableCents
-    : Boolean(bankReference.trim()) && bankTransferApprovedForTotal;
+    : paymentMethod === "split"
+      ? cashAllocationCents > 0 && bankAllocationCents > 0
+        && amountPaidCents >= cashAllocationCents
+        && Boolean(bankReference.trim())
+        && bankTransferApprovedForAmount
+      : paymentMethod === "bank_transfer"
+        ? Boolean(bankReference.trim()) && bankTransferApprovedForAmount
+        : false;
+  const completeCheckout = () => {
+    if (!canCompletePayment || !cart.length || !activeShift.data || mpesaPaymentUnresolved) return;
+    if (paymentMethod === "cash") setCashConfirmOpen(true);
+    else checkout.mutate();
+  };
+  const bankTransferControls = <>
+    <label className="pos-payment-input"><span>Bank transaction reference</span><input value={bankReference} onChange={(event) => { setBankReference(event.target.value); setBankVerification(null); }} maxLength={100} autoComplete="off" placeholder="Enter bank transfer reference" disabled={mpesaPaymentUnresolved} /></label>
+    <div className="bank-verification-amount"><span>Bank transfer portion</span><strong>{money(bankAllocationCents / 100)}</strong></div>
+    <div className="bank-verification-actions">
+      <button type="button" disabled={!cart.length || !activeShift.data || bankAllocationCents <= 0 || !bankReference.trim() || requestBankVerification.isPending || bankVerification?.status === "pending" || bankVerification?.status === "verified" || mpesaPaymentUnresolved} onClick={() => requestBankVerification.mutate()}>
+        {requestBankVerification.isPending ? "Submitting…" : "Request admin verification"}
+      </button>
+      <button type="button" disabled={!bankReference.trim() || checkBankVerification.isPending} onClick={() => checkBankVerification.mutate()}>
+        {checkBankVerification.isPending ? "Checking…" : "Check status"}
+      </button>
+    </div>
+    {bankVerification && <div className={`bank-verification-status status-${bankVerification.status}`} role="status">
+      {bankVerification.status === "verified"
+        ? `Approved for ${money(bankVerification.amount)}.`
+        : bankVerification.status === "pending"
+          ? `Waiting for an administrator to verify ${money(bankVerification.amount)}.`
+          : `Transfer status: ${bankVerification.status}.`}
+      {bankVerification.status === "verified" && bankVerification.amount !== fromCents(bankAllocationCents) && " Payment portion changed; submit a new verification request for the exact amount."}
+    </div>}
+  </>;
   useEffect(() => {
     const handleKey = (event: globalThis.KeyboardEvent) => {
       if (event.key === "F2") {
@@ -3103,18 +3259,22 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       if (event.target instanceof HTMLInputElement) return;
       if (event.key === "F3") { event.preventDefault(); scannerRef.current?.focus(); }
       if (event.key === "F4") { event.preventDefault(); scannerRef.current?.focus(); }
-      if (event.key === "F5") { event.preventDefault(); setCart([]); setSaleDiscount("0.00"); setAmountPaid(""); setCheckoutError(""); }
-      if (event.key === "F6") { event.preventDefault(); if (cart.length) holdSaleMutation.mutate(); }
-      if (event.key === "F7") { event.preventDefault(); void heldSalesQuery.refetch(); }
+      if (event.key === "F5" && !mpesaPaymentUnresolved) { event.preventDefault(); setCart([]); setSaleDiscount("0.00"); setAmountPaid(""); setCheckoutError(""); }
+      if (event.key === "F6") { event.preventDefault(); if (cart.length && !mpesaPaymentUnresolved) holdSaleMutation.mutate(); }
+      if (event.key === "F7") { event.preventDefault(); if (!mpesaPaymentUnresolved) void heldSalesQuery.refetch(); }
       if (event.key === "F9") {
         event.preventDefault();
-        if (canSell && cart.length && canCompletePayment && activeShift.data && !checkout.isPending) checkout.mutate();
+        if (canSell && cart.length && canCompletePayment && activeShift.data && !checkout.isPending) completeCheckout();
       }
-      if (event.key === "Escape") { event.preventDefault(); setCart([]); setSaleDiscount("0.00"); setAmountPaid(""); }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (cashConfirmOpen) setCashConfirmOpen(false);
+        else if (!mpesaPaymentUnresolved && !mpesaPaymentId) { setCart([]); setSaleDiscount("0.00"); setAmountPaid(""); }
+      }
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [cart.length, canSell, canCompletePayment, activeShift.data, checkout.isPending, holdSaleMutation, heldSalesQuery]);
+  }, [cart.length, canSell, canCompletePayment, activeShift.data, checkout.isPending, holdSaleMutation, heldSalesQuery, cashConfirmOpen, mpesaPaymentUnresolved, mpesaPaymentId]);
 
   const actualCashNumber = Math.round((Number(actualCashCounted) || 0) * 100);
   const expectedCashNumber = Math.round(Number(shiftSummary.data?.expectedCash ?? 0) * 100);
@@ -3233,13 +3393,13 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
               <tbody>
                 {cart.map(({ lineId, product, quantity }, index) => <tr className="pos-product-row" key={lineId}>
                   <td>{index + 1}</td><td className="pos-product-code">{product.sku}</td><td className="pos-product-name">{product.name}{(product.brand || product.packageSize) && <small className="pos-product-meta">{[product.brand, product.packageSize].filter(Boolean).join(" · ")}</small>}</td>
-                  <td><div className="pos-table-qty"><button onClick={() => adjust(lineId, -1)}>−</button><input value={quantity} onChange={(event) => {
+                  <td><div className="pos-table-qty"><button disabled={mpesaPaymentUnresolved} onClick={() => adjust(lineId, -1)}>−</button><input disabled={mpesaPaymentUnresolved} value={quantity} onChange={(event) => {
                     const next = Number(event.target.value);
                     if (Number.isFinite(next)) setLineQuantity(lineId, next);
-                  }} /><button onClick={() => adjust(lineId, 1)}>+</button></div></td>
+                  }} /><button disabled={mpesaPaymentUnresolved} onClick={() => adjust(lineId, 1)}>+</button></div></td>
                   <td>{money(product.sellingPrice)}</td>
                   <td>{money(lineTotalCents({ lineId, product, quantity }) / 100)}</td>
-                  <td><button className="pos-row-remove" onClick={() => setCart((current) => current.filter((item) => item.lineId !== lineId))}><X size={14} /></button></td>
+                  <td><button className="pos-row-remove" disabled={mpesaPaymentUnresolved} onClick={() => setCart((current) => current.filter((item) => item.lineId !== lineId))}><X size={14} /></button></td>
                 </tr>)}
                 <tr className="pos-search-row">
                   <td className="pos-search-cell" colSpan={7}>
@@ -3247,6 +3407,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
                       ref={scannerRef}
                       className="pos-search-input"
                       aria-label={`Product entry row ${cart.length + 1}; scan barcode or search products`}
+                      disabled={mpesaPaymentUnresolved}
                       autoComplete="off"
                       autoFocus
                       spellCheck={false}
@@ -3270,7 +3431,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
                       }}
                     />
                     {search.trim() && <div className="pos-search-results">
-                      {(productsQuery.data ?? []).slice(0, 8).map((product, index) => <button key={product.id} className={index === selectedSearchIndex ? "selected" : ""} onMouseEnter={() => setSelectedSearchIndex(index)} onClick={() => {
+                      {(productsQuery.data ?? []).slice(0, 8).map((product, index) => <button key={product.id} className={index === selectedSearchIndex ? "selected" : ""} disabled={mpesaPaymentUnresolved} onMouseEnter={() => setSelectedSearchIndex(index)} onClick={() => {
                         if (addProduct(product)) {
                           setSearch("");
                           setSelectedSearchIndex(0);
@@ -3288,11 +3449,11 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
             </table>
           </div>
           <div className="pos-actions">
-            <button onClick={() => { setCart([]); setSaleDiscount("0.00"); setAmountPaid(""); setCheckoutError(""); }}><Trash2 size={17} /> Clear <small>(F5)</small></button>
-            <button onClick={() => { if (cart.length) holdSaleMutation.mutate(); }} disabled={!cart.length || holdSaleMutation.isPending}><Pause size={17} /> Hold sale <small>(F6)</small></button>
-            <button onClick={() => void heldSalesQuery.refetch()}><Printer size={17} /> Retrieve <small>(F7)</small></button>
+            <button disabled={mpesaPaymentUnresolved} onClick={() => { setCart([]); setSaleDiscount("0.00"); setAmountPaid(""); setCheckoutError(""); }}><Trash2 size={17} /> Clear <small>(F5)</small></button>
+            <button onClick={() => { if (cart.length) holdSaleMutation.mutate(); }} disabled={!cart.length || holdSaleMutation.isPending || mpesaPaymentUnresolved}><Pause size={17} /> Hold sale <small>(F6)</small></button>
+            <button disabled={mpesaPaymentUnresolved} onClick={() => void heldSalesQuery.refetch()}><Printer size={17} /> Retrieve <small>(F7)</small></button>
             <button disabled><Boxes size={17} /> Open drawer <small>(F8)</small></button>
-            <button onClick={() => {
+            <button disabled={mpesaPaymentUnresolved} onClick={() => {
               setPhoneScannerOpen(true);
               setPhonePairingError("");
               if (!phonePairing) createPhonePairing.mutate();
@@ -3308,44 +3469,50 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
           <div className="pos-payment-heading"><span>Transaction summary</span><b>{cart.reduce((sum, item) => sum + item.quantity, 0)} items</b></div>
           <div className="pos-payment-grid">
             <div><span>Subtotal</span><strong>{money(subtotalCents / 100)}</strong></div>
-            <div className="pos-discount-summary"><label htmlFor="sale-discount">Discount</label><input id="sale-discount" type="number" min="0" max={subtotalCents / 100} step="0.01" value={saleDiscount} onChange={(event) => setSaleDiscount(event.target.value)} onBlur={() => setSaleDiscount(fromCents(discountAmountCents))} inputMode="decimal" /></div>
+            <div className="pos-discount-summary"><label htmlFor="sale-discount">Discount</label><input id="sale-discount" type="number" min="0" max={subtotalCents / 100} step="0.01" value={saleDiscount} onChange={(event) => setSaleDiscount(event.target.value)} onBlur={() => setSaleDiscount(fromCents(discountAmountCents))} inputMode="decimal" disabled={mpesaPaymentUnresolved} /></div>
             <div><span>VAT</span><strong>{money(taxCents / 100)}</strong></div>
             <div className="payable"><span>Total payable</span><strong>{money(payableCents / 100)}</strong></div>
           </div>
           {paymentMethod === "cash" ? <>
-            <label className="pos-payment-input"><span>Amount received</span><input value={amountPaid} onChange={(event) => setAmountPaid(event.target.value)} inputMode="decimal" placeholder="0.00" /></label>
+            <label className="pos-payment-input"><span>Amount received</span><input value={amountPaid} onChange={(event) => setAmountPaid(event.target.value)} inputMode="decimal" placeholder="0.00" disabled={mpesaPaymentUnresolved} /></label>
             <div className="pos-payment-change"><span>{changeCents > 0 ? "Change due" : "Balance"}</span><strong>{money((changeCents > 0 ? changeCents : balanceCents) / 100)}</strong></div>
-          </> : <>
-            <label className="pos-payment-input"><span>Bank transaction reference</span><input value={bankReference} onChange={(event) => { setBankReference(event.target.value); setBankVerification(null); }} maxLength={100} autoComplete="off" placeholder="Enter bank transfer reference" /></label>
-            <div className="bank-verification-actions">
-              <button type="button" disabled={!cart.length || !activeShift.data || !bankReference.trim() || requestBankVerification.isPending || bankVerification?.status === "pending" || bankVerification?.status === "verified"} onClick={() => requestBankVerification.mutate()}>
-                {requestBankVerification.isPending ? "Submitting…" : "Request admin verification"}
-              </button>
-              <button type="button" disabled={!bankReference.trim() || checkBankVerification.isPending} onClick={() => checkBankVerification.mutate()}>
-                {checkBankVerification.isPending ? "Checking…" : "Check status"}
-              </button>
-            </div>
-            {bankVerification && <div className={`bank-verification-status status-${bankVerification.status}`} role="status">
-              {bankVerification.status === "verified"
-                ? `Approved for ${money(bankVerification.amount)}.`
-                : bankVerification.status === "pending"
-                  ? `Waiting for an administrator to verify ${money(bankVerification.amount)}.`
-                  : `Transfer status: ${bankVerification.status}.`}
-              {bankVerification.status === "verified" && bankVerification.amount !== fromCents(payableCents) && " Sale total changed; request verification for the exact total using a new reference."}
-            </div>}
-          </>}
+          </> : paymentMethod === "split" ? <>
+            <label className="pos-payment-input"><span>Cash portion</span><input value={cashAllocation} onChange={(event) => { setCashAllocation(event.target.value); setBankVerification(null); }} inputMode="decimal" placeholder="0.00" disabled={mpesaPaymentUnresolved} /></label>
+            <label className="pos-payment-input"><span>Cash received</span><input value={amountPaid} onChange={(event) => setAmountPaid(event.target.value)} inputMode="decimal" placeholder="0.00" disabled={mpesaPaymentUnresolved} /></label>
+            <div className="pos-payment-change"><span>{cashShareChangeCents > 0 ? "Cash change due" : "Cash balance"}</span><strong>{money((cashShareChangeCents > 0 ? cashShareChangeCents : cashShareBalanceCents) / 100)}</strong></div>
+            {bankTransferControls}
+          </> : paymentMethod === "bank_transfer" ? bankTransferControls : (
+            <div className="mpesa-payment-hint">Enter the customer’s phone number in the M-Pesa payment window to request payment.</div>
+          )}
           <div className="pos-payment-methods">
-            <button className={paymentMethod === "cash" ? "active" : ""} type="button" onClick={() => setPaymentMethod("cash")}>Cash</button>
-            <button type="button" disabled title="Configure and verify a payment provider before enabling">M-Pesa</button>
+            <button className={paymentMethod === "cash" ? "active" : ""} type="button" disabled={mpesaPaymentUnresolved} onClick={() => setPaymentMethod("cash")}>Cash</button>
+            <button className={paymentMethod === "mpesa" ? "active" : ""} type="button" disabled={mpesaPaymentUnresolved} onClick={() => { setPaymentMethod("mpesa"); setMpesaDialogOpen(true); setMpesaError(""); }}>M-Pesa</button>
             <button type="button" disabled title="Configure and verify a payment provider before enabling">Card</button>
-            <button className={paymentMethod === "bank_transfer" ? "active" : ""} type="button" onClick={() => setPaymentMethod("bank_transfer")}>Bank transfer</button>
-            <button type="button" disabled title="Split payment requires verified non-cash providers">Split</button>
+            <button className={paymentMethod === "bank_transfer" ? "active" : ""} type="button" disabled={mpesaPaymentUnresolved} onClick={() => setPaymentMethod("bank_transfer")}>Bank transfer</button>
+            <button className={paymentMethod === "split" ? "active" : ""} type="button" disabled={mpesaPaymentUnresolved} title="Split between cash and an administrator-verified bank transfer." onClick={() => setPaymentMethod("split")}>Split</button>
           </div>
-          <div className="payment-setup-note">{paymentMethod === "bank_transfer" ? "An administrator must independently verify the transfer before completing the sale." : "M-Pesa, card, and split checkout remain disabled until provider integrations are configured."}</div>
+          <div className="payment-setup-note">
+            {paymentMethod === "bank_transfer" || paymentMethod === "split"
+              ? "Bank transfers require administrator verification before the sale is completed."
+              : paymentMethod === "mpesa"
+                ? mpesaConfigQuery.data?.configured
+                  ? "M-Pesa is verified by Daraja before the sale is completed."
+                  : "Daraja credentials and a public HTTPS callback are required to accept M-Pesa."
+                : "Card payments remain unavailable until a verified card provider is configured."}
+          </div>
           <div className="pos-payment-actions">
-            <button className="complete" disabled={!canSell || !cart.length || !canCompletePayment || checkout.isPending || !activeShift.data} onClick={() => checkout.mutate()}>{checkout.isPending ? "Processing…" : "Complete Sale"} <span>F9</span></button>
-            <button className="hold" disabled={!cart.length || holdSaleMutation.isPending} onClick={() => holdSaleMutation.mutate()}>Hold Sale <span>F6</span></button>
-            <button className="cancel" onClick={() => { setCart([]); setSaleDiscount("0.00"); setAmountPaid(""); }}>Cancel Sale <span>Esc</span></button>
+            <button className="complete" disabled={!canSell || !cart.length || !canCompletePayment || checkout.isPending || !activeShift.data || mpesaPaymentUnresolved} onClick={completeCheckout}>{checkout.isPending ? "Processing…" : "Complete Sale"} <span>F9</span></button>
+            <button className="hold" disabled={!cart.length || holdSaleMutation.isPending || mpesaPaymentUnresolved} onClick={() => holdSaleMutation.mutate()}>Hold Sale <span>F6</span></button>
+            <button className="cancel" disabled={mpesaPaymentUnresolved} onClick={() => {
+              setCart([]);
+              setSaleDiscount("0.00");
+              setAmountPaid("");
+              setCheckoutError("");
+              if (mpesaStatus === "failed" || mpesaStatus === "cancelled") {
+                setMpesaPaymentId(null);
+                mpesaIdempotencyRef.current = null;
+              }
+            }}>Cancel Sale <span>Esc</span></button>
           </div>
           {!canSell ? <div className="checkout-footnote">Your role cannot complete sales.</div>
             : activeShift.isError ? <div className="checkout-footnote">Shift availability could not be checked.</div>
@@ -3355,6 +3522,123 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
         </aside>
       </div>
       <footer className="pos-statusbar"><span><i /> Ready for new sale...</span><time>{new Date().toLocaleString("en-KE")}</time><b>● Connected</b></footer>
+      {cashConfirmOpen && <div className="pos-confirm-screen cash-confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="cash-confirm-title">
+        <section className="pos-confirm-card">
+          <span className="pos-confirm-eyebrow">CASH PAYMENT</span>
+          <h2 id="cash-confirm-title">Confirm cash received</h2>
+          <div className="cash-confirm-summary">
+            <div><span>Total payable</span><strong>{money(payableCents / 100)}</strong></div>
+            <div><span>Amount received</span><strong>{money(amountPaidCents / 100)}</strong></div>
+            <div><span>Change due</span><strong>{money(changeCents / 100)}</strong></div>
+          </div>
+          <p>Confirm that you received the cash amount shown. This records the sale and opens the receipt.</p>
+          <div className="pos-confirm-actions">
+            <button className="confirm" disabled={checkout.isPending} onClick={() => checkout.mutate()}>{checkout.isPending ? "Recording…" : "Confirm payment"}</button>
+            <button className="cancel" disabled={checkout.isPending} onClick={() => setCashConfirmOpen(false)}>Back</button>
+          </div>
+        </section>
+      </div>}
+      {mpesaDialogOpen && <div className="pos-confirm-screen mpesa-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="mpesa-payment-title">
+        <section className="mpesa-payment-card">
+          <button
+            type="button"
+            className="mpesa-payment-close"
+            aria-label="Close M-Pesa payment"
+            disabled={mpesaPaymentUnresolved || (mpesaPaymentQuery.data?.payment.status === "succeeded" && !receipt)}
+            onClick={() => setMpesaDialogOpen(false)}
+          ><X size={17} /></button>
+          <span className="pos-confirm-eyebrow">M-PESA CHECKOUT</span>
+          <h2 id="mpesa-payment-title">Request customer payment</h2>
+          <p className="mpesa-payment-intro">The customer will receive an STK Push on their phone. Do not mark the sale paid until Daraja verifies the payment.</p>
+          <label>Customer phone number
+            <input
+              type="tel"
+              inputMode="tel"
+              autoComplete="tel"
+              pattern="(?:07[0-9]{8}|2547[0-9]{8})"
+              placeholder="07XXXXXXXX or 2547XXXXXXXX"
+              value={mpesaPhone}
+              onChange={(event) => setMpesaPhone(event.target.value)}
+              disabled={Boolean(mpesaPaymentId)}
+              required
+            />
+          </label>
+          <label>Transaction amount
+            <input value={money(payableCents / 100)} readOnly />
+          </label>
+          <label>Payment description
+            <input maxLength={13} value={mpesaDescription} onChange={(event) => setMpesaDescription(event.target.value)} disabled={Boolean(mpesaPaymentId)} />
+          </label>
+          {mpesaConfigQuery.data?.configured === false && <div className="mpesa-modal-notice" role="alert">
+            {mpesaConfigQuery.data.reason ?? "Daraja is not configured on the server."} Add server-side Daraja credentials and a reachable HTTPS callback URL.
+          </div>}
+          {mpesaConfigQuery.isError && <div className="mpesa-modal-notice" role="alert">M-Pesa availability could not be checked. Retry before accepting a payment.</div>}
+          {!Number.isInteger(payableCents / 100) && cart.length > 0 && <div className="mpesa-modal-notice" role="alert">
+            Daraja STK Push accepts whole Kenyan shillings. Use cash or an approved split for totals with cents.
+          </div>}
+          {mpesaError && <div className="mpesa-modal-notice" role="alert">{mpesaError}</div>}
+          {mpesaPaymentQuery.isError && <div className="mpesa-modal-notice" role="alert">Payment status could not be checked. Retry status check before taking another payment.</div>}
+          {mpesaPaymentQuery.data?.payment && <div className={`mpesa-payment-status status-${mpesaPaymentQuery.data.payment.status}`} role="status">
+            <strong>
+              {mpesaPaymentQuery.data.payment.status === "succeeded" ? "Payment successful and verified"
+                : mpesaPaymentQuery.data.payment.status === "failed" ? "Payment failed"
+                  : mpesaPaymentQuery.data.payment.status === "unknown" ? "Request outcome unknown"
+                    : mpesaPaymentQuery.data.payment.status === "verifying" ? "Verifying with Daraja…"
+                      : "Processing"}
+            </strong>
+            <span>{mpesaPaymentQuery.data.payment.status === "pending"
+              ? "Ask the customer to enter their M-Pesa PIN on their phone."
+              : mpesaPaymentQuery.data.payment.status === "unknown"
+                ? "Do not resend the request. Check the phone and payment status before accepting another method."
+                : mpesaPaymentQuery.data.payment.status === "failed"
+                  ? mpesaPaymentQuery.data.payment.error ?? "The customer did not complete the payment."
+                  : mpesaPaymentQuery.data.payment.status === "verifying"
+                    ? "The callback is being checked against Daraja. The sale is not complete yet."
+                    : mpesaPaymentQuery.data.payment.status === "succeeded"
+                      ? "Preparing the confirmed sale receipt…"
+                      : "Waiting for payment confirmation."}</span>
+            {mpesaPaymentQuery.data.payment.receiptNumber && <small>M-Pesa code: {mpesaPaymentQuery.data.payment.receiptNumber}</small>}
+          </div>}
+          <div className="mpesa-payment-actions">
+            {!mpesaPaymentId
+              ? <button
+                className="confirm"
+                disabled={
+                  !mpesaConfigQuery.data?.configured
+                  || mpesaConfigQuery.isLoading
+                  || !/^(?:07[0-9]{8}|2547[0-9]{8})$/.test(mpesaPhone.trim())
+                  || !mpesaDescription.trim()
+                  || !cart.length
+                  || !activeShift.data
+                  || !Number.isInteger(payableCents / 100)
+                  || requestMpesaPayment.isPending
+                }
+                onClick={() => requestMpesaPayment.mutate()}
+              >{requestMpesaPayment.isPending ? "Sending request…" : "Send payment request"}</button>
+              : mpesaPaymentQuery.data?.payment.status === "failed"
+                ? <>
+                  <button className="confirm" onClick={() => {
+                    setMpesaPaymentId(null);
+                    mpesaIdempotencyRef.current = null;
+                    requestMpesaPayment.reset();
+                    setMpesaError("");
+                  }}>Retry payment</button>
+                  <button className="cancel" disabled={cancelMpesaPayment.isPending} onClick={() => cancelMpesaPayment.mutate()}>
+                    {cancelMpesaPayment.isPending ? "Cancelling…" : "Cancel request"}
+                  </button>
+                </>
+                : mpesaPaymentQuery.data?.payment.status === "succeeded"
+                  ? <button className="confirm" onClick={() => {
+                    const saleId = mpesaPaymentQuery.data?.payment.saleId;
+                    if (saleId) { mpesaReceiptLoadedRef.current = null; void loadMpesaReceipt(saleId); }
+                  }}>Retry receipt</button>
+                  : <button className="cancel" disabled={mpesaPaymentQuery.isFetching} onClick={() => void mpesaPaymentQuery.refetch()}>
+                    {mpesaPaymentQuery.isFetching ? "Checking…" : "Check payment status"}
+                  </button>}
+            <button className="cancel" disabled={mpesaPaymentUnresolved || (mpesaPaymentQuery.data?.payment.status === "succeeded" && !receipt)} onClick={() => setMpesaDialogOpen(false)}>Close</button>
+          </div>
+        </section>
+      </div>}
       {receipt && <ReceiptDialog
         receipt={receipt}
         width={receiptWidth}
