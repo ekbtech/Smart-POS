@@ -16,6 +16,7 @@ import { z } from "zod";
 import {
   api, getErrorMessage, type BranchReport, type DashboardSummary, type Product, type User,
 } from "./api";
+import { createUuid } from "./uuid";
 
 const ReportsCharts = lazy(() => import("./ReportsCharts"));
 
@@ -2884,7 +2885,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   });
   const checkout = useMutation({
     mutationFn: async () => {
-      if (!idempotencyRef.current) idempotencyRef.current = crypto.randomUUID();
+      if (!idempotencyRef.current) idempotencyRef.current = createUuid();
       const cashAmountCents = Math.round((Number(cashAllocation) || 0) * 100);
       const bankAmountCents = payableCents - cashAmountCents;
       const payments = paymentMethod === "split"
@@ -2936,7 +2937,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   });
   const requestMpesaPayment = useMutation({
     mutationFn: async () => {
-    if (!mpesaIdempotencyRef.current) mpesaIdempotencyRef.current = crypto.randomUUID();
+    if (!mpesaIdempotencyRef.current) mpesaIdempotencyRef.current = createUuid();
     return (await api.post<{ payment: MpesaPayment }>("/mpesa/payments", {
       items: aggregateCartItems(cart),
       discount: fromCents(discountAmountCents),

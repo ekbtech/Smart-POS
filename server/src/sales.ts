@@ -476,7 +476,7 @@ export async function createSale(
       }
       const changeDue = cashReceived.minus(cashApplied).toDecimalPlaces(2);
 
-      const receiptNumber = `SP-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${randomUUID().slice(0, 8).toUpperCase()}`;
+      const receiptNumber = `SP-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${randomUUID().replaceAll("-", "").slice(0, 16).toUpperCase()}`;
       const [saleResult] = await connection.execute(
         `INSERT INTO sales (branch_id, cashier_id, customer_id, shift_id, receipt_number, idempotency_key, subtotal, discount, tax, total, status, cash_received, change_due)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
