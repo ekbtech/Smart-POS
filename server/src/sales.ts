@@ -5,6 +5,7 @@ import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 import { pool, withTransaction } from "./db.js";
 import type { AuthUser } from "./auth.js";
 import { HttpError } from "./errors.js";
+import { sendAutomaticSaleReceipt } from "./enterprise.js";
 
 Decimal.set({ precision: 24, rounding: Decimal.ROUND_HALF_UP });
 
@@ -331,7 +332,7 @@ export async function createSale(
   }
 
   try {
-    return await withTransaction(async (connection) => {
+    const saved = await withTransaction<SavedSale>(async (connection) => {
       const replay = await findExistingSale(connection, user.branchId, idempotencyKey);
       if (replay) return replay;
 
@@ -573,6 +574,22 @@ export async function createSale(
         replayed: false,
       };
     });
+    if (!saved.replayed && saved.status === "completed") {
+      void sendAutomaticSaleReceipt(
+        saved.id,
+        user.branchId,
+        input.customerId ?? null,
+        saved.receiptNumber,
+        saved.total,
+        user.name,
+      ).catch((error: unknown) => {
+        console.error("Could not queue the automatic WhatsApp receipt.", {
+          saleId: saved.id,
+          error: error instanceof Error ? error.message : error,
+        });
+      });
+    }
+    return saved;
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "ER_DUP_ENTRY") {
       const connection = await pool.getConnection();

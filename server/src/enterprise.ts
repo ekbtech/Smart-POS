@@ -2,6 +2,7 @@ import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { basename, resolve } from "node:path";
+import { Decimal } from "decimal.js";
 import { z } from "zod";
 import type { RowDataPacket } from "mysql2/promise";
 import { pool, withTransaction } from "./db.js";
@@ -63,6 +64,10 @@ export const notificationSendSchema = z.object({
   templateKey: z.string().trim().max(80).nullable().optional(),
   saleId: z.number().int().positive().nullable().optional(),
   customerId: z.number().int().positive().nullable().optional(),
+}).strict();
+export const dailyEvaluationQuerySchema = z.object({
+  date: z.iso.date(),
+  branchId: z.coerce.number().int().positive().optional(),
 }).strict();
 
 function requireAdmin(user: AuthUser) {
@@ -400,6 +405,118 @@ export async function updateNotificationSettings(input: z.infer<typeof notificat
   return input;
 }
 
+export async function sendAutomaticSaleReceipt(
+  saleId: number,
+  branchId: number,
+  customerId: number | null,
+  receiptNumber: string,
+  total: string,
+  cashierName: string,
+) {
+  if (!customerId) return { sent: false, reason: "No customer was attached to the sale." };
+  const [settings] = await pool.execute<Array<RowDataPacket & { enabled: number; receipt_enabled: number }>>(
+    "SELECT enabled, receipt_enabled FROM notification_settings WHERE id=1",
+  );
+  if (!settings[0]?.enabled || !settings[0].receipt_enabled) {
+    return { sent: false, reason: "Automatic receipt notifications are disabled." };
+  }
+  const [customers] = await pool.execute<Array<RowDataPacket & { phone: string | null }>>(
+    "SELECT phone FROM customers WHERE id=?",
+    [customerId],
+  );
+  const recipient = customers[0]?.phone?.replace(/[^\d+]/g, "");
+  if (!recipient) return { sent: false, reason: "The customer does not have a phone number." };
+  const [existing] = await pool.execute<Array<RowDataPacket & { id: number }>>(
+    `SELECT id FROM notifications
+     WHERE sale_id=? AND template_key='digital_receipt'
+       AND status IN ('queued','sent','delivered') LIMIT 1`,
+    [saleId],
+  );
+  if (existing[0]) return { sent: false, reason: "A digital receipt notification was already queued." };
+  const [branches] = await pool.execute<Array<RowDataPacket & { name: string }>>(
+    "SELECT name FROM branches WHERE id=?",
+    [branchId],
+  );
+  const branchName = branches[0]?.name ?? "Smart POS";
+  const message = `Thank you for shopping at ${branchName}. Receipt ${receiptNumber}. Total paid: KES ${total}. Served by ${cashierName}.`;
+  const token = process.env.WHATSAPP_ACCESS_TOKEN;
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const apiBase = process.env.WHATSAPP_API_BASE_URL?.trim() || "https://graph.facebook.com/v21.0";
+
+  const [result] = await pool.execute(
+    `INSERT INTO notifications
+       (branch_id, customer_id, sale_id, provider, recipient, template_key, status, payload)
+     VALUES (?, ?, ?, 'whatsapp', ?, 'digital_receipt', 'queued', ?)`,
+    [branchId, customerId, saleId, recipient, JSON.stringify({ message, receiptNumber })],
+  );
+  const notificationId = (result as { insertId: number }).insertId;
+  const templateName = process.env.WHATSAPP_RECEIPT_TEMPLATE_NAME?.trim();
+  const templateLanguage = process.env.WHATSAPP_RECEIPT_TEMPLATE_LANGUAGE?.trim() || "en";
+  if (!token || !phoneNumberId || !templateName) {
+    const reason = "WhatsApp credentials or the approved receipt template are not configured.";
+    await pool.execute(
+      "UPDATE notifications SET status='failed', error_message=? WHERE id=?",
+      [reason, notificationId],
+    );
+    return { sent: false, reason };
+  }
+  try {
+    const response = await fetch(`${apiBase}/${phoneNumberId}/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: recipient.replace(/\D/g, ""),
+        type: "template",
+        template: {
+          name: templateName,
+          language: { code: templateLanguage },
+          components: [{
+            type: "body",
+            parameters: [
+              { type: "text", text: branchName },
+              { type: "text", text: receiptNumber },
+              { type: "text", text: total },
+              { type: "text", text: cashierName },
+            ],
+          }],
+        },
+      }),
+    });
+    const providerResult = await response.json().catch(() => null) as {
+      messages?: Array<{ id?: string }>;
+      error?: { message?: string };
+    } | null;
+    if (!response.ok) {
+      await pool.execute(
+        "UPDATE notifications SET status='failed', error_message=?, attempts=attempts+1 WHERE id=?",
+        [providerResult?.error?.message?.slice(0, 1000) ?? "WhatsApp provider rejected the message.", notificationId],
+      );
+      return { sent: false, reason: "WhatsApp provider rejected the notification." };
+    }
+    const providerMessageId = providerResult?.messages?.[0]?.id ?? null;
+    if (!providerMessageId) {
+      await pool.execute(
+        "UPDATE notifications SET status='failed', error_message=?, attempts=attempts+1 WHERE id=?",
+        ["WhatsApp provider returned no message identifier.", notificationId],
+      );
+      return { sent: false, reason: "WhatsApp provider did not confirm accepting the notification." };
+    }
+    await pool.execute(
+      "UPDATE notifications SET status='sent', provider_message_id=?, attempts=1 WHERE id=?",
+      [providerMessageId, notificationId],
+    );
+    return { sent: true, notificationId, providerMessageId };
+  } catch (error) {
+    await pool.execute(
+      "UPDATE notifications SET status='failed', error_message=?, attempts=attempts+1 WHERE id=?",
+      [error instanceof Error ? error.message.slice(0, 1000) : "Network delivery failure.", notificationId],
+    );
+    return { sent: false, reason: "WhatsApp network delivery failed." };
+  }
+}
+
 export async function sendWhatsAppNotification(input: z.infer<typeof notificationSendSchema>, user: AuthUser) {
   requireAdmin(user);
   const [settings] = await pool.execute<Array<RowDataPacket & { enabled: number }>>(
@@ -495,4 +612,162 @@ export async function listElectronicReceipts(user: AuthUser, q = "", branchId?: 
     id: row.id, saleId: row.sale_id, receiptNumber: row.receipt_number, total: row.total,
     cashier: row.cashier, branch: row.branch_name, createdAt: row.created_at.toISOString(),
   }));
+}
+
+export async function getDailyEvaluation(user: AuthUser, date: string, branchId?: number) {
+  if (!user.roles.includes("admin") && !user.roles.includes("manager") && !user.roles.includes("accountant")) {
+    throw new HttpError(403, "Daily transaction evaluation permission required.");
+  }
+  const parsedDate = new Date(`${date}T00:00:00.000Z`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(parsedDate.getTime())
+    || parsedDate.toISOString().slice(0, 10) !== date) {
+    throw new HttpError(400, "A valid evaluation date is required.");
+  }
+
+  const isAdmin = user.roles.includes("admin");
+  let accessibleBranchIds: number[] = [];
+  if (!isAdmin) {
+    const [assignments] = await pool.execute<Array<RowDataPacket & { branch_id: number }>>(
+      `SELECT branch_id FROM branch_assignments WHERE user_id=?
+       UNION SELECT ? AS branch_id`,
+      [user.id, user.branchId],
+    );
+    accessibleBranchIds = assignments.map((row) => Number(row.branch_id));
+    if (branchId && !accessibleBranchIds.includes(branchId)) {
+      throw new HttpError(403, "You do not have access to evaluate this branch.");
+    }
+  }
+
+  const branchScope = (alias: string) => {
+    if (branchId) return { sql: `AND ${alias}.branch_id=?`, values: [branchId] };
+    if (!isAdmin) {
+      return {
+        sql: `AND ${alias}.branch_id IN (${accessibleBranchIds.map(() => "?").join(",")})`,
+        values: accessibleBranchIds,
+      };
+    }
+    return { sql: "", values: [] as number[] };
+  };
+  const start = `${date} 00:00:00`;
+  const salesScope = branchScope("s");
+  const refundScope = branchScope("r");
+  const expenseScope = branchScope("e");
+  const [summaryRows, paymentRows, sales, refunds, expenses] = await Promise.all([
+    pool.execute<Array<RowDataPacket & {
+      gross_sales: string; transactions: number; average_transaction: string;
+    }>>(
+      `SELECT COALESCE(SUM(s.total),0) AS gross_sales, COUNT(*) AS transactions,
+              COALESCE(AVG(s.total),0) AS average_transaction
+       FROM sales s
+       WHERE s.status='completed' AND s.created_at>=?
+         AND s.created_at<DATE_ADD(?, INTERVAL 1 DAY) ${salesScope.sql}`,
+      [start, start, ...salesScope.values],
+    ),
+    pool.execute<Array<RowDataPacket & { method: string; amount: string; transactions: number }>>(
+      `SELECT sp.method, COALESCE(SUM(sp.amount),0) AS amount,
+              COUNT(DISTINCT s.id) AS transactions
+       FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id
+       WHERE s.status='completed' AND sp.status='completed'
+         AND s.created_at>=? AND s.created_at<DATE_ADD(?, INTERVAL 1 DAY) ${salesScope.sql}
+       GROUP BY sp.method ORDER BY amount DESC`,
+      [start, start, ...salesScope.values],
+    ),
+    pool.execute<Array<RowDataPacket & {
+      id: number; receipt_number: string; total: string; status: string; created_at: Date;
+      cashier: string; customer: string | null; item_count: number; payment_methods: string | null; branch: string;
+    }>>(
+      `SELECT s.id, s.receipt_number, s.total, s.status, s.created_at, u.name AS cashier,
+              c.name AS customer, b.name AS branch,
+              (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id=s.id) AS item_count,
+              (SELECT GROUP_CONCAT(DISTINCT CONCAT(sp.method,
+                CASE WHEN sp.status='completed' THEN '' ELSE CONCAT(' (',sp.status,')') END)
+                ORDER BY sp.method SEPARATOR ', ')
+               FROM sale_payments sp WHERE sp.sale_id=s.id) AS payment_methods
+       FROM sales s JOIN users u ON u.id=s.cashier_id JOIN branches b ON b.id=s.branch_id
+       LEFT JOIN customers c ON c.id=s.customer_id
+       WHERE s.created_at>=? AND s.created_at<DATE_ADD(?, INTERVAL 1 DAY) ${salesScope.sql}
+       ORDER BY s.created_at DESC`,
+      [start, start, ...salesScope.values],
+    ),
+    pool.execute<Array<RowDataPacket & {
+      id: number; refund_number: string; total: string; status: string; created_at: Date;
+      actor: string; customer: string | null; reason: string; branch: string;
+    }>>(
+      `SELECT r.id, r.refund_number, r.total, r.status, r.created_at, u.name AS actor,
+              c.name AS customer, r.reason, b.name AS branch
+       FROM refunds r JOIN users u ON u.id=r.created_by JOIN branches b ON b.id=r.branch_id
+       JOIN sales s ON s.id=r.sale_id LEFT JOIN customers c ON c.id=s.customer_id
+       WHERE r.created_at>=? AND r.created_at<DATE_ADD(?, INTERVAL 1 DAY) ${refundScope.sql}
+       ORDER BY r.created_at DESC`,
+      [start, start, ...refundScope.values],
+    ),
+    pool.execute<Array<RowDataPacket & {
+      id: number; amount: string; status: string; created_at: Date; actor: string;
+      payment_method: string; description: string; branch: string;
+    }>>(
+      `SELECT e.id, e.amount, e.status, e.created_at, u.name AS actor,
+              e.payment_method, e.description, b.name AS branch
+       FROM expenses e JOIN users u ON u.id=e.created_by JOIN branches b ON b.id=e.branch_id
+       WHERE e.created_at>=? AND e.created_at<DATE_ADD(?, INTERVAL 1 DAY) ${expenseScope.sql}
+       ORDER BY e.created_at DESC`,
+      [start, start, ...expenseScope.values],
+    ),
+  ]);
+  const summary = summaryRows[0][0];
+  const [refundTotals] = await pool.execute<Array<RowDataPacket & { refunds: string }>>(
+    `SELECT COALESCE(SUM(r.total),0) AS refunds FROM refunds r
+     WHERE r.status='completed' AND r.created_at>=?
+       AND r.created_at<DATE_ADD(?, INTERVAL 1 DAY) ${refundScope.sql}`,
+    [start, start, ...refundScope.values],
+  );
+  const [expenseTotals] = await pool.execute<Array<RowDataPacket & { expenses: string }>>(
+    `SELECT COALESCE(SUM(e.amount),0) AS expenses FROM expenses e
+     WHERE e.status='approved' AND e.created_at>=?
+       AND e.created_at<DATE_ADD(?, INTERVAL 1 DAY) ${expenseScope.sql}`,
+    [start, start, ...expenseScope.values],
+  );
+  const [paymentRowsData] = paymentRows;
+  const [salesData] = sales;
+  const [refundData] = refunds;
+  const [expenseData] = expenses;
+  const grossSales = new Decimal(summary.gross_sales);
+  const completedRefunds = new Decimal(refundTotals[0]?.refunds ?? 0);
+  const approvedExpenses = new Decimal(expenseTotals[0]?.expenses ?? 0);
+  const transactions = [
+    ...salesData.map((row) => ({
+      id: `sale-${row.id}`, kind: "sale" as const, reference: row.receipt_number,
+      amount: row.total, status: row.status, actor: row.cashier, customer: row.customer,
+      description: `${Number(row.item_count)} item lines`, paymentMethod: row.payment_methods,
+      branch: row.branch, createdAt: row.created_at.toISOString(),
+    })),
+    ...refundData.map((row) => ({
+      id: `refund-${row.id}`, kind: "refund" as const, reference: row.refund_number,
+      amount: `-${row.total}`, status: row.status, actor: row.actor, customer: row.customer,
+      description: row.reason, paymentMethod: "cash", branch: row.branch,
+      createdAt: row.created_at.toISOString(),
+    })),
+    ...expenseData.map((row) => ({
+      id: `expense-${row.id}`, kind: "expense" as const, reference: `EXP-${row.id}`,
+      amount: `-${row.amount}`, status: row.status, actor: row.actor, customer: null,
+      description: row.description, paymentMethod: row.payment_method, branch: row.branch,
+      createdAt: row.created_at.toISOString(),
+    })),
+  ].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+  return {
+    date,
+    summary: {
+      grossSales: String(summary.gross_sales),
+      completedTransactions: Number(summary.transactions),
+      averageTransaction: String(summary.average_transaction),
+      refunds: String(refundTotals[0]?.refunds ?? "0"),
+      salesAfterRefunds: grossSales.minus(completedRefunds).toFixed(2),
+      approvedExpenses: String(expenseTotals[0]?.expenses ?? "0"),
+      salesAfterRefundsAndExpenses: grossSales.minus(completedRefunds).minus(approvedExpenses).toFixed(2),
+    },
+    payments: paymentRowsData.map((row) => ({
+      method: row.method, amount: row.amount, transactions: Number(row.transactions),
+    })),
+    transactions,
+  };
 }

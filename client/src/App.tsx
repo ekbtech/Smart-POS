@@ -201,12 +201,13 @@ function AuthenticatedApp() {
         <Route path="/shifts" element={<PermissionRoute module="shifts" user={me.data}><ShiftsPage user={me.data} /></PermissionRoute>} />
         <Route path="/expenses" element={<PermissionRoute module="expenses" user={me.data}><ExpensesPage user={me.data} /></PermissionRoute>} />
         <Route path="/reports" element={<PermissionRoute module="reports" user={me.data}><ReportsPage user={me.data} /></PermissionRoute>} />
+        <Route path="/reports/daily" element={<PermissionRoute module="reports" user={me.data}><DailyEvaluationPage user={me.data} /></PermissionRoute>} />
         <Route path="/sales" element={<PermissionRoute module="sales" user={me.data}><SalesPage user={me.data} /></PermissionRoute>} />
         <Route path="/branches" element={<PermissionRoute module="branches" user={me.data}><BranchesPage /></PermissionRoute>} />
         <Route path="/sync-monitor" element={<PermissionRoute module="sync_monitor" user={me.data}><OfflineSyncPage /></PermissionRoute>} />
         <Route path="/backups" element={<PermissionRoute module="backups" user={me.data}><BackupsPage /></PermissionRoute>} />
         <Route path="/price-history" element={<PermissionRoute module="price_history" user={me.data}><PriceHistoryPage /></PermissionRoute>} />
-        <Route path="/notifications" element={<PermissionRoute module="notifications" user={me.data}><NotificationsPage /></PermissionRoute>} />
+        <Route path="/notifications" element={<PermissionRoute module="notifications" user={me.data}><NotificationsPage user={me.data} /></PermissionRoute>} />
         <Route path="/receipts" element={<PermissionRoute module="receipts" user={me.data}><ElectronicReceiptsPage /></PermissionRoute>} />
         <Route path="/comparisons" element={<PermissionRoute module="comparisons" user={me.data}><ComparisonsPage /></PermissionRoute>} />
         <Route path="/access-denied" element={<AccessDeniedPage />} />
@@ -2320,6 +2321,7 @@ function ReportsPage({ user }: { user: User }) {
         <div className="report-controls">
           <label><span>FROM</span><CalendarDays size={15} /><input type="date" value={from} max={to || undefined} onChange={(event) => setFrom(event.target.value)} /></label>
           <label><span>TO</span><CalendarDays size={15} /><input type="date" value={to} min={from || undefined} onChange={(event) => setTo(event.target.value)} /></label>
+          <Link className="button button-dark" to="/reports/daily">Daily evaluation</Link>
           <button className="button button-dark" onClick={downloadCsv} disabled={!data}><Download size={15} /> Export CSV</button>
         </div>
       </div>
@@ -2376,6 +2378,96 @@ function ReportsPage({ user }: { user: User }) {
       </>}
     </section>
   );
+}
+
+function DailyEvaluationPage({ user }: { user: User }) {
+  const [date, setDate] = useState(() => dateInputValue(new Date()));
+  const [branchId, setBranchId] = useState("");
+  const branches = useQuery({
+    queryKey: ["branches"],
+    queryFn: async () => (await api.get("/branches")).data as Array<{ id: number; name: string; code: string }>,
+  });
+  const evaluation = useQuery({
+    queryKey: ["daily-evaluation", date, branchId],
+    enabled: Boolean(date),
+    queryFn: async () => (await api.get("/reports/daily-evaluation", {
+      params: { date, ...(branchId ? { branchId: Number(branchId) } : {}) },
+    })).data as {
+      date: string;
+      summary: {
+        grossSales: string; completedTransactions: number; averageTransaction: string;
+        refunds: string; salesAfterRefunds: string; approvedExpenses: string; salesAfterRefundsAndExpenses: string;
+      };
+      payments: Array<{ method: string; amount: string; transactions: number }>;
+      transactions: Array<{
+        id: string; kind: "sale" | "refund" | "expense"; reference: string; amount: string;
+        status: string; actor: string; customer: string | null; description: string;
+        paymentMethod: string | null; branch: string; createdAt: string;
+      }>;
+    },
+  });
+  const data = evaluation.data;
+  return <section className="page-content report-page daily-evaluation-page">
+    <div className="report-heading">
+      <PageHeader eyebrow="DAILY BUSINESS REVIEW" title="Daily evaluation" detail="Review every sale, refund and expense recorded for the selected day." />
+      <div className="daily-evaluation-controls">
+        <label>Date<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
+        <label>Branch<select value={branchId} onChange={(event) => setBranchId(event.target.value)} disabled={branches.isPending || branches.isError}>
+          <option value="">All accessible branches</option>
+          {(branches.data ?? []).map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
+        </select></label>
+        <Link className="button button-dark" to="/reports">Reports</Link>
+      </div>
+    </div>
+    {branches.isError && <ErrorBanner message={getErrorMessage(branches.error)} onRetry={() => void branches.refetch()} />}
+    {evaluation.isError && <ErrorBanner message={getErrorMessage(evaluation.error)} onRetry={() => void evaluation.refetch()} />}
+    {evaluation.isPending ? <div className="report-loading"><LoadingRows /></div> : data && <>
+      <div className="metric-grid report-metrics">
+        <MetricCard label="GROSS SALES" value={money(data.summary.grossSales)} caption={`${data.summary.completedTransactions} completed sales`} icon={<CircleDollarSign size={17} />} tone="green" loading={false} />
+        <MetricCard label="REFUNDS" value={money(data.summary.refunds)} caption="Completed cash refunds" icon={<RotateCcw size={17} />} loading={false} />
+        <MetricCard label="SALES AFTER REFUNDS" value={money(data.summary.salesAfterRefunds)} caption="Gross sales less completed refunds" icon={<TrendingUp size={17} />} tone="green" loading={false} />
+        <MetricCard label="APPROVED EXPENSES" value={money(data.summary.approvedExpenses)} caption="Expenses approved for this day" icon={<ReceiptText size={17} />} loading={false} />
+        <MetricCard label="AFTER REFUNDS & EXPENSES" value={money(data.summary.salesAfterRefundsAndExpenses)} caption="Simple review figure, not profit" icon={<CircleDollarSign size={17} />} loading={false} />
+        <MetricCard label="AVERAGE SALE" value={money(data.summary.averageTransaction)} caption="Average completed transaction" icon={<ShoppingBasket size={17} />} loading={false} />
+      </div>
+      <div className="report-notice">The after-refunds-and-expenses figure is a simple daily review only; it is not net profit and does not include product costs or other accounting adjustments.</div>
+      <div className="report-chart-grid">
+        <section className="panel report-panel">
+          <div className="panel-heading"><div><div className="eyebrow">PAYMENT BREAKDOWN</div><h2>Completed payments</h2></div></div>
+          {data.payments.length ? <div className="report-stat-list">{data.payments.map((payment) => <div key={payment.method}>
+            <span>{payment.method.replaceAll("_", " ")} · {payment.transactions} sale(s)</span><strong>{money(payment.amount)}</strong>
+          </div>)}</div> : <EmptyState title="No completed payments" detail="Completed payment totals will appear here." />}
+        </section>
+        <section className="panel report-panel">
+          <div className="panel-heading"><div><div className="eyebrow">DAY CHECK</div><h2>Transaction count</h2></div></div>
+          <div className="report-stat-list">
+            <div><span>All ledger entries</span><strong>{data.transactions.length}</strong></div>
+            <div><span>Sales</span><strong>{data.transactions.filter((item) => item.kind === "sale").length}</strong></div>
+            <div><span>Refunds</span><strong>{data.transactions.filter((item) => item.kind === "refund").length}</strong></div>
+            <div><span>Expenses</span><strong>{data.transactions.filter((item) => item.kind === "expense").length}</strong></div>
+          </div>
+        </section>
+      </div>
+      <section className="panel operation-table-panel daily-ledger-panel">
+        <div className="panel-heading"><div><div className="eyebrow">COMPLETE DAILY LEDGER</div><h2>{new Date(`${data.date}T00:00:00`).toLocaleDateString("en-KE", { dateStyle: "full" })}</h2></div><span className="count-badge">{data.transactions.length}</span></div>
+        <div className="product-table-wrap"><table className="product-table"><thead><tr>
+          <th>TYPE</th><th>REFERENCE</th><th>TIME</th><th>BRANCH</th><th>USER</th><th>CUSTOMER / DETAILS</th><th>PAYMENT</th><th>AMOUNT</th><th>STATUS</th>
+        </tr></thead><tbody>{data.transactions.map((transaction) => <tr key={transaction.id}>
+          <td><span className={`enterprise-status ${transaction.kind === "sale" ? "success" : transaction.kind === "refund" ? "warning" : "neutral"}`}>{transaction.kind}</span></td>
+          <td className="sku-cell">{transaction.reference}</td>
+          <td>{new Date(transaction.createdAt).toLocaleTimeString("en-KE")}</td>
+          <td>{transaction.branch}</td><td>{transaction.actor}</td>
+          <td>{transaction.kind === "sale" ? `${transaction.customer ?? "Walk-in"} · ${transaction.description}` : transaction.description}</td>
+          <td>{transaction.paymentMethod?.replaceAll("_", " ") || "—"}</td>
+          <td className="price-cell">{money(transaction.amount)}</td>
+          <td><span className={`enterprise-status ${transaction.status === "completed" || transaction.status === "approved" ? "success" : transaction.status === "rejected" || transaction.status === "cancelled" ? "danger" : "warning"}`}>{transaction.status.replaceAll("_", " ")}</span></td>
+        </tr>)}</tbody></table>
+          {!data.transactions.length && <EmptyState title="No activity recorded" detail="No sales, refunds or expenses were recorded for this date and branch selection." />}
+        </div>
+      </section>
+    </>}
+    {user.roles.includes("admin") && <p className="daily-evaluation-footnote">Administrator view includes all branches. Other authorized users see only their assigned branches.</p>}
+  </section>;
 }
 
 function PageHeader({ eyebrow, title, detail }: { eyebrow: string; title: string; detail: string }) {
@@ -2527,7 +2619,9 @@ function PriceHistoryPage() {
   </EnterprisePageShell>;
 }
 
-function NotificationsPage() {
+function NotificationsPage({ user }: { user: User }) {
+  const query = useQueryClient();
+  const isAdmin = user.roles.includes("admin");
   const notifications = useQuery({
     queryKey: ["notifications"],
     queryFn: async () => (await api.get("/notifications")).data as Array<{ recipient: string; status: string; providerMessageId: string | null; attempts: number; error: string | null; createdAt: string }>,
@@ -2535,15 +2629,35 @@ function NotificationsPage() {
   const settings = useQuery({
     queryKey: ["notification-settings"],
     queryFn: async () => (await api.get("/notifications/settings")).data,
+    enabled: isAdmin,
+  });
+  const saveSettings = useMutation({
+    mutationFn: (values: { enabled: boolean; dailySummaryEnabled: boolean; lowStockEnabled: boolean; receiptEnabled: boolean }) =>
+      api.put("/notifications/settings", values),
+    onSuccess: () => void query.invalidateQueries({ queryKey: ["notification-settings"] }),
   });
   const send = useMutation({
     mutationFn: async (values: { recipient: string; message: string }) => (await api.post("/notifications/send", values)).data,
   });
   const rows = notifications.data ?? [];
-  return <EnterprisePageShell title="Notification Centre" eyebrow="WHATSAPP AND DELIVERY" actions={<button className="button button-dark" onClick={() => document.querySelector<HTMLInputElement>("#notification-recipient")?.focus()}><Smartphone size={15} /> New message</button>}>
+  const settingsData = settings.data as {
+    enabled: boolean; dailySummaryEnabled: boolean; lowStockEnabled: boolean; receiptEnabled: boolean;
+  } | null | undefined;
+  return <EnterprisePageShell title="Notification Centre" eyebrow="WHATSAPP AND DELIVERY" actions={isAdmin ? <button className="button button-dark" onClick={() => document.querySelector<HTMLInputElement>("#notification-recipient")?.focus()}><Smartphone size={15} /> New message</button> : undefined}>
     {send.isError && <div role="alert" className="error-banner">{getErrorMessage(send.error)}</div>}
-    <div className="enterprise-grid">
-      <section className="panel enterprise-form-panel">
+    {saveSettings.isError && <ErrorBanner message={getErrorMessage(saveSettings.error)} onRetry={() => {
+      if (settingsData) saveSettings.mutate(settingsData);
+    }} />}
+    <div className="enterprise-grid notification-center-grid">
+      {isAdmin && <section className="panel enterprise-form-panel">
+        <div className="panel-heading"><div><div className="eyebrow">AUTOMATIC RECEIPTS</div><h2>Sale notifications</h2></div></div>
+        {settings.isPending ? <LoadingRows /> : settings.isError ? <ErrorBanner message={getErrorMessage(settings.error)} onRetry={() => void settings.refetch()} /> : settingsData && <>
+          <label className="notification-setting"><input type="checkbox" checked={settingsData.enabled} disabled={saveSettings.isPending} onChange={(event) => saveSettings.mutate({ ...settingsData, enabled: event.target.checked })} /><span><strong>Enable WhatsApp notifications</strong><small>Master switch for automatic messages.</small></span></label>
+          <label className="notification-setting"><input type="checkbox" checked={settingsData.receiptEnabled} disabled={saveSettings.isPending || !settingsData.enabled} onChange={(event) => saveSettings.mutate({ ...settingsData, receiptEnabled: event.target.checked })} /><span><strong>Send receipt after each successful sale</strong><small>Requires a customer with a phone number on the sale.</small></span></label>
+          <p className="operation-note">Configure the server-side WhatsApp credentials and an approved receipt template in the server environment. Provider acceptance is recorded as “sent”; it is not a delivery confirmation.</p>
+        </>}
+      </section>}
+      {isAdmin && <section className="panel enterprise-form-panel">
         <div className="panel-heading"><div><div className="eyebrow">WHATSAPP</div><h2>Send notification</h2></div></div>
         <form className="enterprise-form" onSubmit={(event) => {
           event.preventDefault();
@@ -2555,7 +2669,7 @@ function NotificationsPage() {
           <label>Message<textarea name="message" required rows={5} placeholder="Enter notification text" /></label>
           <button className="button button-dark" disabled={send.isPending || settings.isError}>{send.isPending ? "Sending…" : "Send WhatsApp"}</button>
         </form>
-      </section>
+      </section>}
       <section className="panel enterprise-table-panel">
         <div className="panel-heading"><div><div className="eyebrow">DELIVERY HISTORY</div><h2>Messages</h2></div><span className="count-badge">{rows.length}</span></div>
         {notifications.isPending ? <LoadingRows /> : notifications.isError ? <ErrorBanner message={getErrorMessage(notifications.error)} onRetry={() => void notifications.refetch()} /> : rows.length ? <EnterpriseTable

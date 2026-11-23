@@ -51,7 +51,7 @@ import {
 import {
   assignBranchUser, branchAssignmentSchema, branchSchema, createBranch, createDatabaseBackup,
   getBackupSettings, getNotificationSettings, listBackups, listBranches as listEnterpriseBranches, listElectronicReceipts,
-  listNotifications, listOfflineSync, listPriceHistory, notificationSendSchema,
+  getDailyEvaluation, dailyEvaluationQuerySchema, listNotifications, listOfflineSync, listPriceHistory, notificationSendSchema,
   notificationSettingsSchema, offlineSyncSchema, priceHistorySchema, sendWhatsAppNotification,
   updateBackupSettings, updateBranch, updateBranchSchema, updateNotificationSettings,
   verifyBackup, backupSettingsSchema,
@@ -1279,6 +1279,14 @@ app.get("/api/reports/summary", authenticate, requireModule("reports"), requireR
   try {
     const range = parseReportRange(req.query);
     handleOperation(() => getBranchReport(req.user!.branchId, range), res, next);
+  } catch (error) {
+    next(error);
+  }
+});
+app.get("/api/reports/daily-evaluation", authenticate, requireModule("reports"), requireRoles("admin", "manager", "accountant"), (req, res, next) => {
+  try {
+    const input = dailyEvaluationQuerySchema.parse(req.query);
+    handleOperation(() => getDailyEvaluation(req.user!, input.date, input.branchId), res, next);
   } catch (error) {
     next(error);
   }
