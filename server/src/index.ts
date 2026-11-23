@@ -65,11 +65,12 @@ const configuredOrigins = (process.env.CLIENT_ORIGIN ?? "http://localhost:5173")
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
+const allowDevelopmentOrigins = process.env.NODE_ENV !== "production";
 app.disable("x-powered-by");
 app.use(helmet());
 app.use(cors({
   origin(origin, callback) {
-    if (isAllowedClientOrigin(origin, configuredOrigins)) callback(null, true);
+    if (isAllowedClientOrigin(origin, configuredOrigins, allowDevelopmentOrigins)) callback(null, true);
     else callback(new Error("Request origin is not allowed."));
   },
   credentials: true,
@@ -79,7 +80,7 @@ app.use(cookieParser());
 app.use((req, res, next) => {
   if (["POST", "PUT", "PATCH", "DELETE"].includes(req.method)
     && req.headers.origin
-    && !isAllowedClientOrigin(req.headers.origin, configuredOrigins)) {
+    && !isAllowedClientOrigin(req.headers.origin, configuredOrigins, allowDevelopmentOrigins)) {
     res.status(403).json({ error: "Request origin is not allowed." });
     return;
   }

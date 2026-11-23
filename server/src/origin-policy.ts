@@ -1,4 +1,8 @@
-export function isAllowedClientOrigin(origin: string | undefined, configuredOrigins: string[]): boolean {
+export function isAllowedClientOrigin(
+  origin: string | undefined,
+  configuredOrigins: string[],
+  allowDevelopmentPorts: boolean,
+): boolean {
   if (!origin || configuredOrigins.includes(origin)) return true;
   let requestUrl: URL;
   try {
@@ -7,17 +11,18 @@ export function isAllowedClientOrigin(origin: string | undefined, configuredOrig
     return false;
   }
 
-  if ((requestUrl.hostname === "localhost" || requestUrl.hostname === "127.0.0.1")
-    && /^\d+$/.test(requestUrl.port)) {
+  const isDevelopmentPort = Number(requestUrl.port) >= 5173;
+  if (allowDevelopmentPorts && isDevelopmentPort
+    && (requestUrl.hostname === "localhost" || requestUrl.hostname === "127.0.0.1")) {
     return true;
   }
 
+  if (!allowDevelopmentPorts || !isDevelopmentPort) return false;
   return configuredOrigins.some((configuredOrigin) => {
     try {
       const configuredUrl = new URL(configuredOrigin);
-      if (configuredUrl.port !== "5173") return false;
-      configuredUrl.port = "5174";
-      return configuredUrl.origin === requestUrl.origin;
+      return configuredUrl.protocol === requestUrl.protocol
+        && configuredUrl.hostname === requestUrl.hostname;
     } catch {
       return false;
     }
