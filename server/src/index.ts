@@ -15,6 +15,7 @@ import {
   holdSale, listHeldSales, requestBankTransferVerification, retrieveHeldSale,
 } from "./sales.js";
 import { HttpError } from "./errors.js";
+import { isAllowedClientOrigin } from "./origin-policy.js";
 import {
   canAssignStaffRole, createStaff, createStaffSchema, listBranches, listDepartments, listRolePermissions,
   listStaff, listStaffActivity, manageableModuleIds, modulePermissionOverridesSchema, modulePermissionsSchema,
@@ -64,26 +65,11 @@ const configuredOrigins = (process.env.CLIENT_ORIGIN ?? "http://localhost:5173")
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
-const allowedOrigins = new Set([
-  ...configuredOrigins,
-]);
-function isAllowedOrigin(origin: string | undefined): boolean {
-  if (!origin) return true;
-  if (allowedOrigins.has(origin)) return true;
-  try {
-    const url = new URL(origin);
-    return (url.hostname === "localhost" || url.hostname === "127.0.0.1")
-      && (/^\d+$/.test(url.port));
-  } catch {
-    return false;
-  }
-}
-
 app.disable("x-powered-by");
 app.use(helmet());
 app.use(cors({
   origin(origin, callback) {
-    if (isAllowedOrigin(origin)) callback(null, true);
+    if (isAllowedClientOrigin(origin, configuredOrigins)) callback(null, true);
     else callback(new Error("Request origin is not allowed."));
   },
   credentials: true,
@@ -93,7 +79,7 @@ app.use(cookieParser());
 app.use((req, res, next) => {
   if (["POST", "PUT", "PATCH", "DELETE"].includes(req.method)
     && req.headers.origin
-    && !isAllowedOrigin(req.headers.origin)) {
+    && !isAllowedClientOrigin(req.headers.origin, configuredOrigins)) {
     res.status(403).json({ error: "Request origin is not allowed." });
     return;
   }
