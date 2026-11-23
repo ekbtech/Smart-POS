@@ -1506,10 +1506,20 @@ app.post("/api/sales/:id/refunds", authenticate, requireModule("sales"), require
 app.get("/api/dashboard/summary", authenticate, requireModule("dashboard"), async (req, res, next) => {
   try {
     const branchId = req.user!.branchId;
-    const [summary, recentSales, lowStockProducts, lowStockCounts, productCounts] = await Promise.all([
-      query<Array<{ total: string | null; transactions: number } & import("mysql2").RowDataPacket>>(
-        `SELECT COALESCE(SUM(total), 0) AS total, COUNT(*) AS transactions
+    const [summary, salesTrend, recentSales, lowStockProducts, lowStockCounts, productCounts] = await Promise.all([
+      query<Array<{ total: string | null; transactions: number; today_date: string } & import("mysql2").RowDataPacket>>(
+        `SELECT COALESCE(SUM(total), 0) AS total, COUNT(*) AS transactions,
+                DATE_FORMAT(CURDATE(), '%Y-%m-%d') AS today_date
          FROM sales WHERE branch_id = ? AND status = 'completed' AND created_at >= CURDATE()`,
+        [branchId],
+      ),
+      query<Array<{ date: string; revenue: string; transactions: number } & import("mysql2").RowDataPacket>>(
+        `SELECT DATE_FORMAT(created_at, '%Y-%m-%d') AS date, SUM(total) AS revenue, COUNT(*) AS transactions
+         FROM sales
+         WHERE branch_id = ? AND status = 'completed'
+           AND created_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)
+           AND created_at < DATE_ADD(CURDATE(), INTERVAL 1 DAY)
+         GROUP BY DATE(created_at) ORDER BY DATE(created_at)`,
         [branchId],
       ),
       query<Array<{ id: number; receipt_number: string; total: string; created_at: Date; cashier: string; status: string } & import("mysql2").RowDataPacket>>(
@@ -1549,6 +1559,10 @@ app.get("/api/dashboard/summary", authenticate, requireModule("dashboard"), asyn
       summary: {
         todaySales: String(summary[0]?.total ?? "0.00"),
         todayTransactions: Number(summary[0]?.transactions ?? 0),
+        todayDate: summary[0]?.today_date,
+        salesTrend: salesTrend.map((point) => ({
+          date: point.date, revenue: String(point.revenue), transactions: Number(point.transactions),
+        })),
         productCount: Number(productCounts[0]?.count ?? 0),
         lowStockCount: Number(lowStockCounts[0]?.count ?? 0),
         recentSales: recentSales.map((sale) => ({

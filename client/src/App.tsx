@@ -20,6 +20,7 @@ import { createUuid } from "./uuid";
 import { listOfflineSales, removeOfflineSale, saveOfflineSale, updateOfflineSale, type OfflineSaleRecord } from "./offline";
 
 const ReportsCharts = lazy(() => import("./ReportsCharts"));
+const DashboardSalesChart = lazy(() => import("./DashboardSalesChart"));
 
 const money = (value: string | number) => new Intl.NumberFormat("en-KE", {
   style: "currency", currency: "KES", maximumFractionDigits: 2,
@@ -401,15 +402,20 @@ function DashboardPage({ user }: { user: User }) {
   });
   const data = summary.data;
   const isAdmin = user.roles.some((role) => ["admin", "manager"].includes(role));
+  const weekSales = data?.salesTrend.reduce((total, point) => total + Number(point.revenue), 0) ?? 0;
+  const averageSale = data && data.todayTransactions > 0
+    ? Number(data.todaySales) / data.todayTransactions
+    : 0;
   return (
     <section className={`page-content dashboard-page${isAdmin ? " admin-overview" : ""}`}>
       <div className="page-heading">
         <div>
-          <div className="eyebrow"><span className="eyebrow-dot" /> {greeting.toUpperCase()}</div>
+          <div className="eyebrow"><span className="eyebrow-dot" /> BUSINESS OVERVIEW · {greeting.toUpperCase()}</div>
           <h1>{timeGreeting}, {user.name.split(" ")[0]}<span className="heading-period">.</span></h1>
           <p>{isAdmin ? "Monitor store performance and operational priorities." : "Here’s what’s happening across your store today."}</p>
         </div>
         <div className="dashboard-heading-actions">
+          <span className="dashboard-updated">Updated {summary.dataUpdatedAt ? new Date(summary.dataUpdatedAt).toLocaleTimeString("en-KE", { hour: "2-digit", minute: "2-digit" }) : "—"}</span>
           <button className="dashboard-refresh" type="button" onClick={() => void summary.refetch()} disabled={summary.isFetching} aria-label="Refresh dashboard">
             <RefreshCw size={15} className={summary.isFetching ? "dashboard-refreshing" : ""} />
             <span>{summary.isFetching ? "Refreshing" : "Refresh"}</span>
@@ -421,8 +427,8 @@ function DashboardPage({ user }: { user: User }) {
       {isAdmin && (
         <div className="admin-operations-strip">
           <div className="admin-operation-status">
-            <span className="status-dot" />
-            <div><strong>Operations are live</strong><small>Dashboard synced with completed store activity</small></div>
+            <div className="dashboard-command-icon"><LayoutDashboard size={17} /></div>
+            <div><strong>Quick actions</strong><small>Jump directly to a key workspace</small></div>
           </div>
           <div className="admin-quick-actions" aria-label="Quick actions">
             {user.modules?.includes("pos") && <Link to="/pos"><ShoppingCart size={16} /><span>Open POS</span></Link>}
@@ -434,33 +440,38 @@ function DashboardPage({ user }: { user: User }) {
       )}
       <div className="metric-grid">
         <MetricCard label="TODAY'S SALES" value={data ? money(data.todaySales) : "—"} caption={`${data?.todayTransactions ?? 0} completed transactions`} icon={<CircleDollarSign size={19} />} tone="green" loading={summary.isPending} />
-        <MetricCard label="ACTIVE PRODUCTS" value={data ? String(data.productCount).padStart(2, "0") : "—"} caption="Across your product catalogue" icon={<Boxes size={19} />} loading={summary.isPending} />
-        <MetricCard label="NEEDS ATTENTION" value={data ? String(data.lowStockCount).padStart(2, "0") : "—"} caption="Products at or below reorder level" icon={<ArrowDownLeft size={19} />} tone="amber" loading={summary.isPending} />
-        <div className="metric-card trend-card">
-          <div className="metric-top"><span>AVERAGE SALE</span><TrendingUp size={18} /></div>
-          <div className={`trend-value ${summary.isPending ? "skeleton" : ""}`}>
-            {summary.isPending ? " " : data && data.todayTransactions > 0 ? money(Number(data.todaySales) / data.todayTransactions) : "Ksh 0.00"}
-          </div>
-          <div className="metric-caption"><span className="trend-indicator" /> Per completed transaction</div>
-          <div className="mini-bars" aria-hidden="true">{[31, 47, 38, 60, 49, 74, 56, 83, 67, 93, 72, 100].map((height, i) => <i key={i} style={{ height: `${height}%` }} />)}</div>
-        </div>
+        <MetricCard label="TRANSACTIONS TODAY" value={data ? String(data.todayTransactions) : "—"} caption="Completed sales today" icon={<ShoppingBasket size={19} />} loading={summary.isPending} />
+        <MetricCard label="ACTIVE PRODUCTS" value={data ? String(data.productCount) : "—"} caption="Available in the catalogue" icon={<Boxes size={19} />} loading={summary.isPending} />
+        <MetricCard label="LOW STOCK ITEMS" value={data ? String(data.lowStockCount) : "—"} caption="At or below reorder level" icon={<ArrowDownLeft size={19} />} tone="amber" loading={summary.isPending} />
       </div>
+      {isAdmin && <section className="panel dashboard-chart-panel">
+        <div className="panel-heading">
+          <div><div className="eyebrow">SALES PERFORMANCE</div><h2>Revenue over the last 7 days</h2></div>
+          <div className="dashboard-chart-stats">
+            <div><span>7-DAY REVENUE</span><strong>{data ? money(weekSales) : "—"}</strong></div>
+            <div><span>AVERAGE SALE TODAY</span><strong>{data ? money(averageSale) : "—"}</strong></div>
+          </div>
+        </div>
+        {summary.isPending ? <div className="dashboard-chart-loading"><LoadingRows /></div> : data && <Suspense fallback={<div className="dashboard-chart-loading">Loading sales chart…</div>}>
+          <DashboardSalesChart salesTrend={data.salesTrend} todayDate={data.todayDate} />
+        </Suspense>}
+      </section>}
       <div className="dashboard-columns">
         <section className="panel sales-panel">
-          <div className="panel-heading"><div><div className="eyebrow">THE LATEST</div><h2>Recent sales</h2></div><Link to="/pos" className="text-link">New sale <ArrowUpRight size={15} /></Link></div>
+          <div className="panel-heading"><div><div className="eyebrow">TRANSACTION ACTIVITY</div><h2>Recent sales</h2></div>{user.modules?.includes("sales") && <Link to="/sales" className="text-link">View all <ArrowUpRight size={15} /></Link>}</div>
           {summary.isPending ? <LoadingRows /> : data?.recentSales.length ? <div className="sales-list">
             {data.recentSales.map((sale) => <div className="sale-row" key={sale.id}><div className="receipt-icon"><ShoppingBasket size={17} /></div><div className="sale-details"><strong>{sale.receiptNumber}</strong><small>{sale.cashier} · {new Date(sale.createdAt).toLocaleTimeString("en-KE", { hour: "2-digit", minute: "2-digit" })}</small></div><span className={`sale-complete ${sale.status !== "completed" ? "sale-pending" : ""}`}>{sale.status.replace("_", " ").toUpperCase()}</span><strong className="sale-amount">{money(sale.total)}</strong></div>)}
           </div> : <EmptyState title="No sales just yet" detail="Your completed transactions will appear here." /> }
         </section>
         <section className="panel stock-panel">
-          <div className="panel-heading"><div><div className="eyebrow">STOCK WATCH</div><h2>Needs a restock</h2></div><span className="count-badge">{data?.lowStockCount ?? "—"}</span></div>
+          <div className="panel-heading"><div><div className="eyebrow">INVENTORY HEALTH</div><h2>Needs attention</h2></div>{user.modules?.includes("inventory") && <Link to="/inventory" className="text-link">Inventory <ArrowUpRight size={15} /></Link>}</div>
           {summary.isPending ? <LoadingRows /> : data?.lowStockProducts.length ? <div className="stock-list">
             {data.lowStockProducts.map((product) => <div className="stock-row" key={product.id}><div className="stock-dot" /><div className="stock-details"><strong>{product.name}</strong><small>Reorder at {Number(product.reorderLevel).toFixed(0)} units</small></div><span className="stock-qty">{Number(product.stock).toFixed(0)} <small>left</small></span></div>)}
           </div> : <EmptyState title="Stock looks healthy" detail="Low-stock items will be listed here." />}
-          <div className="stock-footnote"><span className="status-dot" /> Inventory updates after each completed sale</div>
+          {user.modules?.includes("inventory") && data && data.lowStockCount > data.lowStockProducts.length && <Link to="/inventory" className="stock-more-link">View {data.lowStockCount - data.lowStockProducts.length} more low-stock items</Link>}
         </section>
       </div>
-      <div className="bottom-note"><div className="note-icon"><ArrowLeftRight size={17} /></div><div><strong>A workspace that grows with you</strong><span>Products, inventory, and reporting tools are being added in thoughtful steps.</span></div><span className="note-status">FOUNDATION · LIVE</span></div>
+      <div className="dashboard-footer"><span>Figures reflect completed sales and current inventory.</span>{user.modules?.includes("reports") && <Link to="/reports/daily">Open daily evaluation <ArrowUpRight size={14} /></Link>}</div>
     </section>
   );
 }

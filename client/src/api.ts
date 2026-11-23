@@ -39,6 +39,8 @@ export type Product = {
 export type DashboardSummary = {
   todaySales: string;
   todayTransactions: number;
+  todayDate: string;
+  salesTrend: Array<{ date: string; revenue: string; transactions: number }>;
   productCount: number;
   lowStockCount: number;
   recentSales: Array<{
