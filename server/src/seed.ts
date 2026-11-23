@@ -52,37 +52,43 @@ async function seed(): Promise<void> {
       [userId],
     );
 
-    for (const categoryName of [...new Set(products.map((product) => product[3]))]) {
-      await connection.execute("INSERT IGNORE INTO categories (name) VALUES (?)", [categoryName]);
-    }
-    for (const [sku, barcode, name, category, unit, price, tax, stock] of products) {
-      await connection.execute(
-        `INSERT INTO products (sku, barcode, name, category_id, unit, selling_price, tax_rate, reorder_level)
-         SELECT ?, ?, ?, c.id, ?, ?, ?, ? FROM categories c WHERE c.name = ?
-         ON DUPLICATE KEY UPDATE name = VALUES(name)`,
-        [sku, barcode, name, unit, price, tax, stock, category],
-      );
-      await connection.execute(
-        `INSERT INTO inventory (branch_id, product_id, on_hand)
-         SELECT ?, id, ? FROM products WHERE sku = ?
-         ON DUPLICATE KEY UPDATE product_id = VALUES(product_id)`,
-        [branchId, Number(stock) * 2, sku],
-      );
-      const openingReference = `SEED:${sku}`;
-      const [openingRows] = await connection.execute<Array<{ id: number } & import("mysql2").RowDataPacket>>(
-        "SELECT id FROM stock_movements WHERE branch_id = ? AND movement_type = 'opening' AND reference = ? LIMIT 1",
-        [branchId, openingReference],
-      );
-      if (!openingRows[0]) {
+    const seedSampleProducts = process.env.SEED_SAMPLE_PRODUCTS !== "false";
+    if (seedSampleProducts) {
+      for (const categoryName of [...new Set(products.map((product) => product[3]))]) {
         await connection.execute(
-          `INSERT INTO stock_movements (branch_id, product_id, movement_type, quantity, reference, created_by)
-           SELECT ?, id, 'opening', ?, ?, ? FROM products WHERE sku = ?`,
-          [branchId, Number(stock) * 2, openingReference, userId, sku],
+          "INSERT IGNORE INTO categories (name) VALUES (?)",
+          [categoryName],
         );
+      }
+      for (const [sku, barcode, name, category, unit, price, tax, stock] of products) {
+        await connection.execute(
+          `INSERT INTO products (sku, barcode, name, category_id, unit, selling_price, tax_rate, reorder_level)
+           SELECT ?, ?, ?, c.id, ?, ?, ?, ? FROM categories c WHERE c.name = ?
+           ON DUPLICATE KEY UPDATE name = VALUES(name)`,
+          [sku, barcode, name, unit, price, tax, stock, category],
+        );
+        await connection.execute(
+          `INSERT INTO inventory (branch_id, product_id, on_hand)
+           SELECT ?, id, ? FROM products WHERE sku = ?
+           ON DUPLICATE KEY UPDATE product_id = VALUES(product_id)`,
+          [branchId, Number(stock) * 2, sku],
+        );
+        const openingReference = `SEED:${sku}`;
+        const [openingRows] = await connection.execute<Array<{ id: number } & import("mysql2").RowDataPacket>>(
+          "SELECT id FROM stock_movements WHERE branch_id = ? AND movement_type = 'opening' AND reference = ? LIMIT 1",
+          [branchId, openingReference],
+        );
+        if (!openingRows[0]) {
+          await connection.execute(
+            `INSERT INTO stock_movements (branch_id, product_id, movement_type, quantity, reference, created_by)
+             SELECT ?, id, 'opening', ?, ?, ? FROM products WHERE sku = ?`,
+            [branchId, Number(stock) * 2, openingReference, userId, sku],
+          );
+        }
       }
     }
     await connection.commit();
-    console.info(`Seeded admin ${email}, branch MAIN, and ${products.length} sample products.`);
+    console.info(`Seeded admin ${email}, branch MAIN, and ${seedSampleProducts ? products.length : 0} sample products.`);
   } catch (error) {
     await connection.rollback();
     throw error;

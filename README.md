@@ -15,6 +15,16 @@ A React + TypeScript retail operations application with an Express API and MySQL
 4. Run `npm run db:migrate` and `npm run db:seed`.
 5. Run `npm run dev`. The web app is at `http://localhost:5173`; the API listens on port 4000.
 
+## Render deployment
+
+The root `render.yaml` defines one Render web service. It builds the client and API together, serves the client and `/api` from the same HTTPS origin, and applies database migrations before starting the API. Render supplies `PORT` and `JWT_SECRET`; set `DATABASE_URL` in the Render dashboard.
+
+This application requires MySQL 8. Render does not provide a managed MySQL service, so attach a separately hosted MySQL 8 database that accepts connections from Render. Do not use a laptop's `localhost` or private-LAN database address. If you want to keep current business data, back it up and import it into the hosted database before pointing the app at it; deployment does not copy local data.
+
+To create the first administrator in a brand-new, empty database, temporarily set `SEED_ADMIN_EMAIL`, a strong `SEED_ADMIN_PASSWORD`, and `SEED_SAMPLE_PRODUCTS=false` in the Render environment, then run `npm run db:seed` from the Render Shell. This creates the initial branch and administrator without adding demo products. Remove those temporary variables after seeding. Do not run the seed against an existing production database unless you intend to grant the specified account administrator access.
+
+The Blueprint uses Render's free web-service plan, which can sleep when idle and is not appropriate for uninterrupted shop operations. Choose an always-on plan in Render for production use. Configure `CLIENT_ORIGIN` to your exact HTTPS custom-domain origin if you add one. Payment, WhatsApp, and backup integrations also need their server-side credentials/configuration; backup storage must be durable and separate from the live database, not the web service's ephemeral filesystem.
+
 ### Android phone barcode scanner
 
 From POS, select **Phone scanner**; from an Add Product form, select **Connect Phone Scanner**. Each flow creates a one-time QR code. On Android Chrome, scan it to open `/mobile-scanner`, grant camera access, and use the rear camera (EAN-13, EAN-8, UPC-A, UPC-E, and Code 128). Manual barcode entry, connection status, reconnect, and disconnect controls are available on the phone. The laptop also shows whether the phone is connected and can revoke its pairing.

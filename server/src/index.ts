@@ -4,6 +4,8 @@ import cors from "cors";
 import express from "express";
 import { rateLimit } from "express-rate-limit";
 import helmet from "helmet";
+import { dirname, extname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { z, ZodError } from "zod";
 import {
   authenticate, authenticatePos, changePassword, currentUser, login, logout, posLogin, posLogout, requireRoles, requireModule,
@@ -61,11 +63,18 @@ import {
 
 const app = express();
 const port = Number(process.env.PORT ?? 4000);
-const configuredOrigins = (process.env.CLIENT_ORIGIN ?? "http://localhost:5173")
+const defaultOrigins = process.env.NODE_ENV === "production" ? "" : "http://localhost:5173";
+const configuredOrigins = (process.env.CLIENT_ORIGIN ?? defaultOrigins)
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
+const renderHostname = process.env.RENDER_EXTERNAL_HOSTNAME?.trim();
+if (renderHostname && !configuredOrigins.includes(`https://${renderHostname}`)) {
+  configuredOrigins.push(`https://${renderHostname}`);
+  app.set("trust proxy", 1);
+}
 const allowDevelopmentOrigins = process.env.NODE_ENV !== "production";
+const clientDistPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../client/dist");
 app.disable("x-powered-by");
 app.use(helmet());
 app.use(cors({
@@ -143,7 +152,14 @@ function handleOperation(
   void work().then((result) => res.status(status).json(result), next);
 }
 
-app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
+app.get("/api/health", async (_req, res, next) => {
+  try {
+    await pool.query("SELECT 1");
+    res.json({ status: "ok" });
+  } catch (error) {
+    next(error);
+  }
+});
 app.get("/api/branches", authenticate, async (req, res, next) => {
   handleOperation(() => listEnterpriseBranches(req.user!), res, next);
 });
@@ -1595,6 +1611,19 @@ app.post("/api/sales", authenticate, authenticatePos, requireModule("pos"), requ
     next(error);
   }
 });
+
+if (process.env.NODE_ENV === "production") {
+  app.use(express.static(clientDistPath));
+  app.get(/.*/, (req, res, next) => {
+    if (req.path === "/api" || req.path.startsWith("/api/") || extname(req.path) || !req.accepts("html")) {
+      next();
+      return;
+    }
+    res.sendFile(resolve(clientDistPath, "index.html"), (error) => {
+      if (error) next(error);
+    });
+  });
+}
 
 app.use((_req, res) => res.status(404).json({ error: "Not found." }));
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
