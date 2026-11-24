@@ -3219,7 +3219,6 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const [checkoutError, setCheckoutError] = useState("");
   const [openingCash, setOpeningCash] = useState("0.00");
   const [amountPaid, setAmountPaid] = useState("");
-  const [receipt, setReceipt] = useState<SaleReceipt | null>(null);
   const [receiptWidth, setReceiptWidth] = useState<"58mm" | "80mm">("80mm");
   const [transactionHistoryOpen, setTransactionHistoryOpen] = useState(false);
   const [transactionSearch, setTransactionSearch] = useState("");
@@ -3252,7 +3251,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const scanInputRef = useRef({ value: "", lastInputAt: 0, rapidCharacters: 0 });
   const idempotencyRef = useRef<string | null>(null);
   const mpesaIdempotencyRef = useRef<string | null>(null);
-  const mpesaReceiptLoadedRef = useRef<number | null>(null);
+  const mpesaSaleHandledRef = useRef<number | null>(null);
   const processedPhoneScansRef = useRef(new Set<string>());
   const phoneScanAcknowledgementsRef = useRef(new Map<string, {
     status: "added" | "unknown" | "rejected" | "error";
@@ -3504,7 +3503,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
         return { offlineQueued: true as const, offlineId: record.offlineId };
       }
     },
-    onSuccess: async (result) => {
+    onSuccess: (result) => {
       if (result.offlineQueued) {
         setPosConnectionStatus("OFFLINE");
         setPendingOfflineCount((count) => count + 1);
@@ -3515,8 +3514,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
         return;
       }
       const sale = result.sale;
-      setToast(`Sale ${sale.receiptNumber} completed · ${money(sale.total)}`);
-      setTransactionHistoryOpen(true);
+      setToast(`Sale ${sale.receiptNumber} completed · Ready for a new sale.`);
       setCart([]);
       setSaleDiscount("0.00");
       setAmountPaid("");
@@ -3526,19 +3524,15 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       setBankVerification(null);
       setMpesaPaymentId(null);
       mpesaIdempotencyRef.current = null;
-      mpesaReceiptLoadedRef.current = null;
+      mpesaSaleHandledRef.current = null;
       setCheckoutError("");
       idempotencyRef.current = null;
       setCashConfirmOpen(false);
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       void queryClient.invalidateQueries({ queryKey: ["products"] });
       void queryClient.invalidateQueries({ queryKey: ["sales"] });
-      try {
-        const { data } = await api.get<SaleReceipt>(`/pos/sales/${sale.id}/receipt`);
-        setReceipt(data);
-      } catch (error) {
-        setCheckoutError(`Sale ${sale.receiptNumber} completed, but its receipt could not be loaded: ${getErrorMessage(error)}`);
-      }
+      setTransactionHistoryOpen(false);
+      window.requestAnimationFrame(() => scannerRef.current?.focus());
     },
     onError: (error) => setCheckoutError(getErrorMessage(error)),
   });
@@ -3582,36 +3576,31 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     },
     onError: (error) => setMpesaError(getErrorMessage(error)),
   });
-  const loadMpesaReceipt = async (saleId: number) => {
-    try {
-      const { data } = await api.get<SaleReceipt>(`/pos/sales/${saleId}/receipt`);
-      setReceipt(data);
-      setToast(`Sale ${data.sale.receiptNumber} completed · ${money(data.sale.total)}`);
-      setTransactionHistoryOpen(true);
-      setCart([]);
-      setSaleDiscount("0.00");
-      setAmountPaid("");
-      setPaymentMethod("cash");
-      setBankReference("");
-      setCashAllocation("");
-      setBankVerification(null);
-      setMpesaDialogOpen(false);
-      setMpesaPaymentId(null);
-      mpesaIdempotencyRef.current = null;
-      idempotencyRef.current = null;
-      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-      void queryClient.invalidateQueries({ queryKey: ["products"] });
-      void queryClient.invalidateQueries({ queryKey: ["sales"] });
-    } catch (error) {
-      mpesaReceiptLoadedRef.current = null;
-      setCheckoutError(`M-Pesa was confirmed, but the receipt could not be loaded: ${getErrorMessage(error)}`);
-    }
+  const completeMpesaSale = (saleId: number) => {
+    setToast(`Sale #${saleId} completed · Ready for a new sale.`);
+    setCart([]);
+    setSaleDiscount("0.00");
+    setAmountPaid("");
+    setPaymentMethod("cash");
+    setBankReference("");
+    setCashAllocation("");
+    setBankVerification(null);
+    setMpesaDialogOpen(false);
+    setMpesaPaymentId(null);
+    setMpesaError("");
+    mpesaIdempotencyRef.current = null;
+    idempotencyRef.current = null;
+    setTransactionHistoryOpen(false);
+    void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    void queryClient.invalidateQueries({ queryKey: ["products"] });
+    void queryClient.invalidateQueries({ queryKey: ["sales"] });
+    window.requestAnimationFrame(() => scannerRef.current?.focus());
   };
   useEffect(() => {
     const payment = mpesaPaymentQuery.data?.payment;
-    if (payment?.status === "succeeded" && payment.saleId && mpesaReceiptLoadedRef.current !== payment.saleId) {
-      mpesaReceiptLoadedRef.current = payment.saleId;
-      void loadMpesaReceipt(payment.saleId);
+    if (payment?.status === "succeeded" && payment.saleId && mpesaSaleHandledRef.current !== payment.saleId) {
+      mpesaSaleHandledRef.current = payment.saleId;
+      completeMpesaSale(payment.saleId);
     }
   }, [mpesaPaymentQuery.data?.payment.status, mpesaPaymentQuery.data?.payment.saleId]);
   const retrieveHeldSaleMutation = useMutation({
@@ -4198,7 +4187,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
             <div><span>Amount received</span><strong>{money(amountPaidCents / 100)}</strong></div>
             <div><span>Change due</span><strong>{money(changeCents / 100)}</strong></div>
           </div>
-          <p>Confirm that you received the cash amount shown. This records the sale and opens the receipt.</p>
+          <p>Confirm that you received the cash amount shown. The sale will be saved and the register will be ready for the next sale.</p>
           <div className="pos-confirm-actions">
             <button className="confirm" disabled={checkout.isPending} onClick={() => checkout.mutate()}>{checkout.isPending ? "Recording…" : "Confirm payment"}</button>
             <button className="cancel" disabled={checkout.isPending} onClick={() => setCashConfirmOpen(false)}>Back</button>
@@ -4211,7 +4200,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
             type="button"
             className="mpesa-payment-close"
             aria-label="Close M-Pesa payment"
-            disabled={mpesaPaymentUnresolved || (mpesaPaymentQuery.data?.payment.status === "succeeded" && !receipt)}
+            disabled={mpesaPaymentUnresolved}
             onClick={() => setMpesaDialogOpen(false)}
           ><X size={17} /></button>
           <span className="pos-confirm-eyebrow">M-PESA CHECKOUT</span>
@@ -4262,7 +4251,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
                   : mpesaPaymentQuery.data.payment.status === "verifying"
                     ? "The callback is being checked against Daraja. The sale is not complete yet."
                     : mpesaPaymentQuery.data.payment.status === "succeeded"
-                      ? "Preparing the confirmed sale receipt…"
+                      ? "Payment confirmed. The register is ready for the next sale."
                       : "Waiting for payment confirmation."}</span>
             {mpesaPaymentQuery.data.payment.receiptNumber && <small>M-Pesa code: {mpesaPaymentQuery.data.payment.receiptNumber}</small>}
           </div>}
@@ -4297,30 +4286,15 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
                 : mpesaPaymentQuery.data?.payment.status === "succeeded"
                   ? <button className="confirm" onClick={() => {
                     const saleId = mpesaPaymentQuery.data?.payment.saleId;
-                    if (saleId) { mpesaReceiptLoadedRef.current = null; void loadMpesaReceipt(saleId); }
-                  }}>Retry receipt</button>
+                    if (saleId) completeMpesaSale(saleId);
+                  }}>Continue to POS</button>
                   : <button className="cancel" disabled={mpesaPaymentQuery.isFetching} onClick={() => void mpesaPaymentQuery.refetch()}>
                     {mpesaPaymentQuery.isFetching ? "Checking…" : "Check payment status"}
                   </button>}
-            <button className="cancel" disabled={mpesaPaymentUnresolved || (mpesaPaymentQuery.data?.payment.status === "succeeded" && !receipt)} onClick={() => setMpesaDialogOpen(false)}>Close</button>
+            <button className="cancel" disabled={mpesaPaymentUnresolved} onClick={() => setMpesaDialogOpen(false)}>Close</button>
           </div>
         </section>
       </div>}
-      {receipt && <ReceiptDialog
-        receipt={receipt}
-        width={receiptWidth}
-        onWidthChange={setReceiptWidth}
-        onClose={() => setReceipt(null)}
-        allowPrinting={user.modules?.includes("transaction_print") === true}
-        onNewSale={() => {
-          setReceipt(null);
-          setCart([]);
-          setSaleDiscount("0.00");
-          setAmountPaid("");
-          setCheckoutError("");
-          window.requestAnimationFrame(() => scannerRef.current?.focus());
-        }}
-      />}
       {historyReceipt.data && <ReceiptDialog
         receipt={historyReceipt.data}
         width={receiptWidth}
