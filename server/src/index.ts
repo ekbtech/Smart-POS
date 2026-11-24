@@ -295,7 +295,7 @@ app.get("/api/auth/me", authenticate, currentUser);
 app.post("/api/auth/change-password", authenticate, (req, res, next) => void changePassword(req, res).catch(next));
 app.post("/api/pos/login", loginLimiter, (req, res, next) => void posLogin(req, res).catch(next));
 app.get("/api/pos/session", authenticate, authenticatePos, (req, res) => {
-  res.json({ cashier: { ...req.posUser, username: req.posUser?.posUsername } });
+  res.json({ cashier: { ...req.posUser, username: req.posUser?.posUsername ?? req.posUser?.name } });
 });
 app.post("/api/pos/logout", authenticate, authenticatePos, (req, res, next) => void posLogout(req, res).catch(next));
 app.post(

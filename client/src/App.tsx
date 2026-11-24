@@ -9,6 +9,7 @@ import type { BrowserMultiFormatReader } from "@zxing/browser";
 import { lazy, Suspense, useMemo, useRef, useState } from "react";
 import { useEffect } from "react";
 import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import axios from "axios";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import type { KeyboardEvent, ReactNode } from "react";
@@ -319,7 +320,6 @@ function LoginPage({ onLogin }: { onLogin: (user: User) => void }) {
               {login.isPending ? "Signing in…" : "Sign in"}
             </button>
           </form>
-          <div className="secure-note"><ShieldCheck size={15} /> Secure access to your Smart POS account</div>
         </div>
         <footer className="login-footer">Smart POS · Retail management</footer>
       </section>
@@ -3006,73 +3006,41 @@ function MobileScannerPage() {
 }
 
 function PosEntryPage({ user }: { user: User }) {
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
-  const [message, setMessage] = useState("");
-  const [fieldErrors, setFieldErrors] = useState<{ username?: string; password?: string }>({});
-  const [authenticated, setAuthenticated] = useState(false);
-  const [cashier, setCashier] = useState<{ id: number; name: string; username: string } | null>(null);
+  const queryClient = useQueryClient();
   const session = useQuery({
     queryKey: ["pos-session"],
     queryFn: async () => (await api.get<{ cashier: { id: number; name: string; username: string } }>("/pos/session")).data.cashier,
     retry: false,
   });
   useEffect(() => {
-    if (session.data) {
-      setCashier(session.data);
-      setAuthenticated(true);
+    if (axios.isAxiosError(session.error) && session.error.response?.status === 401) {
+      void queryClient.resetQueries({ queryKey: ["me"] });
     }
-  }, [session.data]);
-  const login = useMutation({
-    mutationFn: () => api.post<{ cashier: { id: number; name: string; username: string } }>("/pos/login", { username, password }),
-    onSuccess: ({ data }) => {
-      setCashier(data.cashier);
-      setAuthenticated(true);
-      setMessage("");
-    },
-    onError: (error) => setMessage(getErrorMessage(error)),
-  });
+  }, [queryClient, session.error]);
   const logout = useMutation({
-    mutationFn: () => api.post("/pos/logout"),
+    mutationFn: async () => {
+      await api.post("/pos/logout");
+      await api.post("/auth/logout");
+    },
     onSuccess: () => {
-      setAuthenticated(false);
-      setCashier(null);
-      setUsername("");
-      setPassword("");
-      setMessage("");
+      queryClient.clear();
       window.location.assign("/");
     },
   });
-  const submit = (event: React.FormEvent) => {
-    event.preventDefault();
-    const errors: { username?: string; password?: string } = {};
-    if (!username) errors.username = "POS username is required.";
-    else if (username.trim().length < 4) errors.username = "Username must contain at least 4 characters.";
-    if (!password) errors.password = "POS password is required.";
-    else if (password.length < 4) errors.password = "Password must contain at least 4 characters.";
-    setFieldErrors(errors);
-    if (Object.keys(errors).length === 0) login.mutate();
-  };
-  if (authenticated && cashier) {
-    return <PosPage user={user} cashier={cashier} onLogout={() => logout.mutate()} />;
+  if (session.isPending) {
+    return <div className="boot-screen"><div className="brand-mark">s</div><span>Opening your register…</span></div>;
   }
-  return (
+  if (session.isError) return (
     <main className="pos-login-page">
-      <section className="pos-login-card">
-        <div className="pos-login-brand"><span className="brand-mark">s</span><div><strong>Smart POS</strong><small>Cashier authentication</small></div></div>
-        <h1>POS access</h1>
-        <p>Sign in with an authorized cashier account to open the register.</p>
-        {message && <div className="pos-login-error" role="alert">{message}</div>}
-        <form onSubmit={submit} noValidate>
-          <label><span>POS username</span><input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" autoFocus placeholder="Enter POS username" /><small>{fieldErrors.username}</small></label>
-          <label><span>Password</span><div className="pos-password-field"><input type={showPassword ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" placeholder="Enter password" /><button type="button" onClick={() => setShowPassword((visible) => !visible)}>{showPassword ? "Hide" : "Show"}</button></div><small>{fieldErrors.password}</small></label>
-          <button className="pos-login-submit" disabled={login.isPending}>{login.isPending ? "Authenticating…" : "Open POS register"}</button>
-        </form>
-        <Link className="pos-login-back" to="/">← Back to main application</Link>
+      <section className="pos-login-card" role="alert">
+        <div className="pos-login-brand"><span className="brand-mark">s</span><div><strong>Smart POS</strong><small>Register unavailable</small></div></div>
+        <h1>Could not open the register</h1>
+        <p>{getErrorMessage(session.error)}</p>
+        <button className="pos-login-submit" onClick={() => void session.refetch()}>Try again</button>
       </section>
     </main>
   );
+  return <PosPage user={user} cashier={session.data} onLogout={() => logout.mutate()} />;
 }
 
 function PosSignOutConfirmation({
@@ -3761,7 +3729,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       <section className="pos-close-screen">
         <header className="pos-dedicated-header">
           <div className="pos-header-brand"><strong>Smart POS</strong><span>{activeShift.data?.branchName ?? `Branch ${user.branchId}`}</span></div>
-          <div className="pos-header-cashier"><span>Cashier</span><strong>{cashier.username}</strong></div>
+          <div className="pos-header-cashier"><span>Cashier</span><strong>{cashier.name}</strong></div>
           <div className="pos-header-shift"><span>Shift</span><strong className={activeShift.data ? "open" : "closed"}>{activeShift.data ? "OPEN" : "CLOSED"}</strong></div>
           <button className="pos-header-action" onClick={() => setShiftCloseOpen(false)}>Back to POS</button>
           <button className="pos-header-signout" onClick={() => setSignOutConfirmOpen(true)}>Sign Out</button>
@@ -3817,7 +3785,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     <section className="pos-page pos-desktop">
       <header className="pos-dedicated-header">
         <div className="pos-header-brand"><strong>Smart POS</strong><span>{activeShift.data?.branchName ?? `Branch ${user.branchId}`}</span></div>
-        <div className="pos-header-cashier"><span>Cashier</span><strong>{cashier.username}</strong></div>
+        <div className="pos-header-cashier"><span>Cashier</span><strong>{cashier.name}</strong></div>
         <div className="pos-header-time"><span>{new Date().toLocaleDateString("en-KE", { weekday: "short", year: "numeric", month: "short", day: "2-digit" })}</span><strong>{new Date().toLocaleTimeString("en-KE", { hour: "2-digit", minute: "2-digit" })}</strong></div>
         <div className="pos-header-shift"><span>Shift</span><strong className={activeShift.data ? "open" : "closed"}>{activeShift.data ? "OPEN" : "CLOSED"}</strong></div>
         <button className="pos-header-action" onClick={() => setShiftCloseOpen(true)}>Shift Change</button>

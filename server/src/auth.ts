@@ -345,6 +345,51 @@ export function requireModule(moduleId: string) {
   };
 }
 
+function canUsePos(user: AuthUser): boolean {
+  return user.modules?.includes("pos") === true
+    && user.roles.some((role) => ["admin", "manager", "cashier"].includes(role));
+}
+
+async function createPosSessionForAuthenticatedUser(req: Request, res: Response): Promise<boolean> {
+  const user = req.user;
+  if (!user || !req.sessionId) {
+    res.status(401).json({ error: "Authentication required." });
+    return false;
+  }
+  if (user.mustChangePassword) {
+    res.status(403).json({ error: "Change your temporary password before using POS." });
+    return false;
+  }
+  if (!canUsePos(user)) {
+    res.status(403).json({ error: "This account is not authorized for POS access." });
+    return false;
+  }
+  const sessions = await query<Array<{ expires_at: Date } & RowDataPacket>>(
+    "SELECT expires_at FROM auth_sessions WHERE id = ? AND user_id = ? AND expires_at > NOW() LIMIT 1",
+    [req.sessionId, user.id],
+  );
+  if (!sessions[0]) {
+    res.status(401).json({ error: "Session expired. Please sign in again." });
+    return false;
+  }
+  const posSessionId = randomUUID();
+  const expiresAt = sessions[0].expires_at;
+  await execute("INSERT INTO pos_sessions (id, user_id, expires_at) VALUES (?, ?, ?)", [
+    posSessionId, user.id, expiresAt,
+  ]);
+  await execute(
+    "INSERT INTO audit_logs (user_id, action, entity_type, entity_id) VALUES (?, 'pos.login', 'user', ?)",
+    [user.id, String(user.id)],
+  );
+  res.cookie(posSessionCookie, posSessionId, {
+    httpOnly: true, sameSite: cookieSameSite, secure: process.env.NODE_ENV === "production",
+    expires: expiresAt, path: "/",
+  });
+  req.posUser = user;
+  req.posSessionId = posSessionId;
+  return true;
+}
+
 export async function logout(req: Request, res: Response): Promise<void> {
   if (req.sessionId && req.user) {
     await execute(
@@ -449,37 +494,40 @@ export async function posLogin(req: Request, res: Response): Promise<void> {
 
 export async function authenticatePos(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const sessionId = req.cookies?.[posSessionCookie];
-    if (!sessionId) { res.status(401).json({ error: "POS authentication required." }); return; }
-    const rows = await query<Array<{
-      id: number; name: string; email: string; branch_id: number; pos_username: string; must_change_password: number;
-    } & RowDataPacket>>(
-      `SELECT u.id, u.name, u.email, u.branch_id, u.pos_username, u.must_change_password
-       FROM users u JOIN pos_sessions s ON s.user_id = u.id
-       WHERE s.id = ? AND u.is_active = TRUE AND s.expires_at > NOW() LIMIT 1`,
-      [sessionId],
-    );
-    if (!rows[0]) { res.status(401).json({ error: "POS session expired. Authenticate again." }); return; }
-    if (rows[0].must_change_password) {
+    const user = req.user;
+    if (!user || !req.sessionId) {
+      res.status(401).json({ error: "Authentication required." });
+      return;
+    }
+    if (user.mustChangePassword) {
       res.status(403).json({ error: "Change your temporary password before using POS." });
       return;
     }
-    const roles = await query<Array<{ name: string } & RowDataPacket>>(
-      "SELECT r.name FROM roles r JOIN user_roles ur ON ur.role_id = r.id WHERE ur.user_id = ?",
-      [rows[0].id],
-    );
-    const roleNames = roles.map((role) => role.name);
-    if (!roleNames.some((role) => ["admin", "manager", "cashier"].includes(role))) {
+    if (!canUsePos(user)) {
       res.status(403).json({ error: "This account is not authorized for POS access." });
       return;
     }
-    req.posUser = {
-      id: rows[0].id, name: rows[0].name, email: rows[0].email,
-      branchId: rows[0].branch_id, roles: roleNames,
-      posUsername: rows[0].pos_username,
-    };
-    req.posSessionId = sessionId;
-    await execute("UPDATE pos_sessions SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?", [sessionId]);
+
+    const sessionId = req.cookies?.[posSessionCookie];
+    if (sessionId) {
+      const rows = await query<Array<{ user_id: number } & RowDataPacket>>(
+        `SELECT s.user_id FROM pos_sessions s JOIN users u ON u.id = s.user_id
+         WHERE s.id = ? AND u.is_active = TRUE AND s.expires_at > NOW() LIMIT 1`,
+        [sessionId],
+      );
+      if (rows[0]?.user_id === user.id) {
+        req.posUser = user;
+        req.posSessionId = sessionId;
+        await execute("UPDATE pos_sessions SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?", [sessionId]);
+        next();
+        return;
+      }
+      res.clearCookie(posSessionCookie, {
+        httpOnly: true, sameSite: cookieSameSite, secure: process.env.NODE_ENV === "production", path: "/",
+      });
+    }
+
+    if (!(await createPosSessionForAuthenticatedUser(req, res))) return;
     next();
   } catch (error) {
     next(error);
