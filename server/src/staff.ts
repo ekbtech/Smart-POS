@@ -17,7 +17,12 @@ export const manageableModuleIds = new Set([
   "dashboard", "pos", "sales", "products", "inventory", "purchases", "suppliers",
   "customers", "expenses", "shifts", "reports", "permissions",
   "branches", "sync_monitor", "backups", "price_history", "notifications", "receipts", "comparisons",
+  "transaction_own", "transaction_all", "transaction_details", "transaction_print",
+  "transaction_reprint", "transaction_export", "transaction_cancel", "transaction_refund",
 ]);
+export const landingModuleIds = new Set(
+  [...manageableModuleIds].filter((moduleId) => !moduleId.startsWith("transaction_")),
+);
 
 export const createStaffSchema = z.object({
   name: z.string().trim().min(2).max(150),
@@ -137,9 +142,9 @@ async function ensureLandingAllowed(
      LEFT JOIN user_permissions up ON up.user_id=? AND up.module_id=m.id
      LEFT JOIN user_roles ur ON ur.user_id=?
      LEFT JOIN role_permissions rp ON rp.role_id=ur.role_id AND rp.module_id=m.id
-     WHERE m.route=? AND m.id IN (${[...manageableModuleIds].map(() => "?").join(",")})
+     WHERE m.route=? AND m.id IN (${[...landingModuleIds].map(() => "?").join(",")})
      GROUP BY m.id, up.allowed`,
-    [userId, userId, landing, ...manageableModuleIds],
+    [userId, userId, landing, ...landingModuleIds],
   );
   if (!modules.some((module) => Boolean(module.allowed))) {
     throw new HttpError(400, "The default landing page must be enabled for this user.");

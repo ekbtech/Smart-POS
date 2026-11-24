@@ -35,6 +35,7 @@ import {
   decideExpense, expenseDecisionSchema, expenseSchema, getActiveShift, getInventorySummary, getShiftCloseSummary, listCustomers, listExpenses,
   getPurchaseOrder, getStockMovements, listInventory, listPurchaseOrders, listRefunds, listSuppliers, openShift,
   openShiftSchema, purchaseOrderSchema, receivePurchaseOrder, receiveSchema, refundSchema, adjustInventory,
+  cancelPendingSale, cancelSaleSchema,
   supplierSchema, completeStockTake, createStockTake, getStockTake, listExpiryBatches, listStockTakes,
   stockTakeCompletionSchema, stockTakeSchema, createInventoryTransfer, dispatchInventoryTransfer,
   getInventoryTransfer, inventoryTransferReceiptSchema, inventoryTransferSchema, listInventoryTransfers,
@@ -51,6 +52,9 @@ import {
   cancelFailedMpesaPayment, getMpesaAvailability, getMpesaPaymentStatus, mpesaPaymentRequestSchema,
   receiveMpesaCallback, startMpesaPayment,
 } from "./mpesa.js";
+import {
+  canViewAllTransactions, listTransactions, transactionHistoryQuerySchema, transactionsToCsv,
+} from "./transactions.js";
 import {
   assignBranchUser, branchAssignmentSchema, branchSchema, createBranch, createDatabaseBackup,
   getBackupSettings, getNotificationSettings, listBackups, listBranches as listEnterpriseBranches, listElectronicReceipts,
@@ -128,6 +132,16 @@ function requireAnyModule(...moduleIds: string[]): express.RequestHandler {
   return (req, res, next) => {
     if (!moduleIds.some((moduleId) => req.user?.modules?.includes(moduleId))) {
       res.status(403).json({ error: "You do not have permission to access this module." });
+      return;
+    }
+    next();
+  };
+}
+
+function requireTransactionViewScope(): express.RequestHandler {
+  return (req, res, next) => {
+    if (!req.user || (!canViewAllTransactions(req.user) && !req.user.modules?.includes("transaction_own"))) {
+      res.status(403).json({ error: "You do not have permission to view transaction records." });
       return;
     }
     next();
@@ -282,7 +296,7 @@ app.post("/api/notifications/send", authenticate, requireRoles("admin", "manager
     handleOperation(() => sendWhatsAppNotification(input, req.user!), res, next, 202);
   } catch (error) { next(error); }
 });
-app.get("/api/electronic-receipts", authenticate, requireAnyModule("receipts", "sales"), (req, res, next) => {
+app.get("/api/electronic-receipts", authenticate, requireAnyModule("receipts", "sales"), requireTransactionViewScope(), (req, res, next) => {
   const q = typeof req.query.q === "string" ? req.query.q.trim().slice(0, 100) : "";
   const branchId = typeof req.query.branchId === "string" ? positiveId(req.query.branchId) : undefined;
   const from = typeof req.query.from === "string" ? req.query.from : "";
@@ -464,7 +478,7 @@ app.get("/api/access/modules", authenticate, requireRoles("admin"), async (_req,
   try {
     res.json({ modules: await query<Array<{ id: string; name: string; route: string; sort_order: number } & import("mysql2").RowDataPacket>>(
       `SELECT id, name, route, sort_order FROM modules
-       WHERE id IN (${[...manageableModuleIds].map(() => "?").join(",")}) ORDER BY sort_order`,
+      WHERE id IN (${[...manageableModuleIds].map(() => "?").join(",")}) ORDER BY sort_order`,
       [...manageableModuleIds],
     ).then((rows) => rows.map((row) => ({
       id: row.id, name: row.name, route: row.route, sortOrder: row.sort_order,
@@ -1265,9 +1279,9 @@ app.post("/api/expenses/:id/decision", authenticate, requireModule("expenses"), 
   }
 });
 
-app.get("/api/refunds", authenticate, requireModule("sales"), async (req, res, next) => {
+app.get("/api/refunds", authenticate, requireModule("sales"), requireModule("transaction_refund"), async (req, res, next) => {
   try {
-    const refunds = await listRefunds(req.user!.branchId);
+    const refunds = await listRefunds(req.user!);
     res.json({ refunds: refunds.map((refund) => ({
       id: refund.id, saleId: refund.sale_id, refundNumber: refund.refund_number, reason: refund.reason,
       total: refund.total, createdAt: refund.created_at.toISOString(), receiptNumber: refund.receipt_number,
@@ -1295,37 +1309,20 @@ app.get("/api/reports/daily-evaluation", authenticate, requireModule("reports"),
   }
 });
 
+app.get("/api/sales/export", authenticate, requireModule("sales"), requireModule("transaction_export"), async (req, res, next) => {
+  try {
+    const filters = transactionHistoryQuerySchema.parse(req.query);
+    const transactions = await listTransactions(req.user!, filters, 10_000);
+    res.attachment("transaction-history.csv").type("text/csv").send(transactionsToCsv(transactions));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/sales", authenticate, requireModule("sales"), async (req, res, next) => {
   try {
-    const search = typeof req.query.q === "string" ? req.query.q.trim().slice(0, 100) : "";
-    const from = typeof req.query.from === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.from) ? req.query.from : "";
-    const to = typeof req.query.to === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.to) ? req.query.to : "";
-    const conditions = ["s.branch_id = ?"];
-    const parameters: Array<string | number> = [req.user!.branchId];
-    if (search) {
-      conditions.push("(s.receipt_number LIKE ? OR CAST(s.id AS CHAR) LIKE ? OR u.name LIKE ?)");
-      const like = `%${search}%`;
-      parameters.push(like, like, like);
-    }
-    if (from) { conditions.push("s.created_at >= ?"); parameters.push(`${from} 00:00:00`); }
-    if (to) { conditions.push("s.created_at < DATE_ADD(?, INTERVAL 1 DAY)"); parameters.push(`${to} 00:00:00`); }
-    const sales = await query<Array<{
-      id: number; receipt_number: string; total: string; status: string; created_at: Date; cashier: string;
-      customer_name: string | null; item_count: number;
-    } & import("mysql2").RowDataPacket>>(
-      `SELECT s.id, s.receipt_number, s.total, s.status, s.created_at, u.name AS cashier,
-              c.name AS customer_name, COUNT(si.id) AS item_count
-       FROM sales s JOIN users u ON u.id = s.cashier_id
-       LEFT JOIN customers c ON c.id = s.customer_id
-       LEFT JOIN sale_items si ON si.sale_id = s.id
-       WHERE ${conditions.join(" AND ")} GROUP BY s.id ORDER BY s.created_at DESC LIMIT 100`,
-      parameters,
-    );
-    res.json({ sales: sales.map((sale) => ({
-      id: sale.id, receiptNumber: sale.receipt_number, total: sale.total, status: sale.status,
-      createdAt: sale.created_at.toISOString(), cashier: sale.cashier, customer: sale.customer_name,
-      itemCount: Number(sale.item_count),
-    })) });
+    const filters = transactionHistoryQuerySchema.parse(req.query);
+    res.json({ sales: await listTransactions(req.user!, filters) });
   } catch (error) {
     next(error);
   }
@@ -1424,23 +1421,37 @@ app.post("/api/mpesa/callback", mpesaCallbackLimiter, (req, res, next) => {
   );
 });
 
-async function loadSaleReceipt(id: number, branchId: number, cashierId?: number) {
-  const cashierCondition = cashierId === undefined ? "" : " AND s.cashier_id = ?";
-  const saleParameters: Array<number> = [id, branchId];
-  if (cashierId !== undefined) saleParameters.push(cashierId);
-  const [sales, items, payments] = await Promise.all([
-    query<Array<{
+async function loadSaleReceipt(id: number, branchId?: number, cashierId?: number) {
+  const saleConditions = ["s.id = ?"];
+  const saleParameters: Array<number> = [id];
+  if (branchId !== undefined) {
+    saleConditions.push("s.branch_id = ?");
+    saleParameters.push(branchId);
+  }
+  if (cashierId !== undefined) {
+    saleConditions.push("s.cashier_id = ?");
+    saleParameters.push(cashierId);
+  }
+  const sales = await query<Array<{
       id: number; receipt_number: string; subtotal: string; discount: string; tax: string;
       total: string; status: string; created_at: Date; cashier: string; customer_name: string | null;
       branch_name: string; cash_received: string | null; change_due: string;
+      transaction_status: string;
     } & import("mysql2").RowDataPacket>>(
       `SELECT s.id, s.receipt_number, s.subtotal, s.discount, s.tax, s.total, s.status, s.created_at,
-              s.cash_received, s.change_due, u.name AS cashier, c.name AS customer_name, b.name AS branch_name
+              s.cash_received, s.change_due, u.name AS cashier, c.name AS customer_name, b.name AS branch_name,
+              CASE WHEN s.status = 'cancelled' THEN 'cancelled'
+                   WHEN s.status = 'pending_payment' THEN 'pending'
+                   WHEN (SELECT COALESCE(SUM(r.total), 0) FROM refunds r
+                         WHERE r.sale_id = s.id AND r.status = 'completed') >= s.total THEN 'refunded'
+                   ELSE 'completed' END AS transaction_status
        FROM sales s JOIN users u ON u.id = s.cashier_id JOIN branches b ON b.id = s.branch_id
        LEFT JOIN customers c ON c.id = s.customer_id
-       WHERE s.id = ? AND s.branch_id = ?${cashierCondition} LIMIT 1`,
+       WHERE ${saleConditions.join(" AND ")} LIMIT 1`,
       saleParameters,
-    ),
+    );
+  if (!sales[0]) return null;
+  const [items, payments] = await Promise.all([
     query<Array<{
       id: number; product_id: number; sku_snapshot: string; name_snapshot: string; quantity: string;
       unit_price: string; tax_rate: string; line_total: string; refunded: string;
@@ -1457,12 +1468,11 @@ async function loadSaleReceipt(id: number, branchId: number, cashierId?: number)
       [id],
     ),
   ]);
-  if (!sales[0]) return null;
   return {
     sale: {
       id: sales[0].id, receiptNumber: sales[0].receipt_number, subtotal: sales[0].subtotal,
       discount: sales[0].discount, tax: sales[0].tax, total: sales[0].total,
-      status: sales[0].status, createdAt: sales[0].created_at.toISOString(),
+      status: sales[0].transaction_status, createdAt: sales[0].created_at.toISOString(),
       cashier: sales[0].cashier, customer: sales[0].customer_name, branch: sales[0].branch_name,
       cashReceived: sales[0].cash_received, changeDue: sales[0].change_due,
     },
@@ -1496,11 +1506,17 @@ app.get("/api/pos/sales/:id/receipt", authenticate, authenticatePos, requireModu
   }
 });
 
-app.get("/api/sales/:id", authenticate, requireModule("sales"), async (req, res, next) => {
+app.get("/api/sales/:id/receipt", authenticate, requireModule("sales"), requireTransactionViewScope(), requireModule("transaction_reprint"), async (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid sale ID." }); return; }
   try {
-    const receipt = await loadSaleReceipt(id, req.user!.branchId);
+    const user = req.user!;
+    const canViewAll = canViewAllTransactions(user);
+    const receipt = await loadSaleReceipt(
+      id,
+      user.roles.includes("admin") ? undefined : user.branchId,
+      canViewAll ? undefined : user.id,
+    );
     if (!receipt) { res.status(404).json({ error: "Sale not found." }); return; }
     res.json(receipt);
   } catch (error) {
@@ -1508,12 +1524,41 @@ app.get("/api/sales/:id", authenticate, requireModule("sales"), async (req, res,
   }
 });
 
-app.post("/api/sales/:id/refunds", authenticate, requireModule("sales"), requireRoles("admin", "manager"), (req, res, next) => {
+app.get("/api/sales/:id", authenticate, requireModule("sales"), requireTransactionViewScope(), requireModule("transaction_details"), async (req, res, next) => {
+  const id = positiveId(req.params.id ?? "");
+  if (!id) { res.status(400).json({ error: "Invalid sale ID." }); return; }
+  try {
+    const user = req.user!;
+    const canViewAll = canViewAllTransactions(user);
+    const detail = await loadSaleReceipt(
+      id,
+      user.roles.includes("admin") ? undefined : user.branchId,
+      canViewAll ? undefined : user.id,
+    );
+    if (!detail) { res.status(404).json({ error: "Sale not found." }); return; }
+    res.json(detail);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/sales/:id/refunds", authenticate, requireModule("sales"), requireModule("transaction_refund"), (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid sale ID." }); return; }
   try {
     const input = refundSchema.parse(req.body);
     handleOperation(() => createRefund(id, input, req.user!), res, next, 201);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/sales/:id/cancel", authenticate, requireModule("sales"), requireModule("transaction_cancel"), (req, res, next) => {
+  const id = positiveId(req.params.id ?? "");
+  if (!id) { res.status(400).json({ error: "Invalid sale ID." }); return; }
+  try {
+    const input = cancelSaleSchema.parse(req.body);
+    handleOperation(() => cancelPendingSale(id, input, req.user!), res, next);
   } catch (error) {
     next(error);
   }

@@ -585,6 +585,11 @@ export async function listElectronicReceipts(user: AuthUser, q = "", branchId?: 
   if (!user.roles.includes("admin") && !user.roles.includes("manager") && !user.roles.includes("cashier")) {
     throw new HttpError(403, "Receipt permission required.");
   }
+  const canViewAllTransactions = user.roles.includes("admin") || user.modules?.includes("transaction_all") === true;
+  const canViewOwnTransactions = user.roles.includes("admin") || user.modules?.includes("transaction_own") === true;
+  if (!canViewAllTransactions && !canViewOwnTransactions) {
+    throw new HttpError(403, "You do not have permission to view transaction records.");
+  }
   const conditions = ["s.status='completed'"];
   const values: Array<string | number> = [];
   if (!user.roles.includes("admin")) {
@@ -593,6 +598,10 @@ export async function listElectronicReceipts(user: AuthUser, q = "", branchId?: 
   } else if (branchId) {
     conditions.push("er.branch_id=?");
     values.push(branchId);
+  }
+  if (!canViewAllTransactions) {
+    conditions.push("s.cashier_id=?");
+    values.push(user.id);
   }
   if (q) { conditions.push("(er.receipt_number LIKE CONCAT('%', ?, '%') OR u.name LIKE CONCAT('%', ?, '%'))"); values.push(q, q); }
   if (from) { conditions.push("er.created_at>=?"); values.push(`${from} 00:00:00`); }

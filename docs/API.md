@@ -32,17 +32,20 @@ Revokes the server-side session and clears the cookie.
 - `POST /pos/scanner/:id/scans`, `GET /pos/scanner/:id/status`, `POST /pos/scanner/:id/reconnect`, `POST /pos/scanner/:id/disconnect` — scanner-bearer-authenticated phone operations; barcode scans are queued to the owning laptop session, and disconnect revokes the scanner token.
 - `GET /pos/scanner/pairing/:id/poll`, `POST /pos/scanner/pairing/:id/ack`, `DELETE /pos/scanner/pairing/:id` — active POS-session operations to receive/acknowledge barcode scans and revoke pairing.
 
-POS sales, held-sale listing, hold and retrieval require both the main authenticated session and an active dedicated POS session. A POS session is independent of the main application login and must be repeated after logout or expiry.
+POS sales, held-sale listing, hold and retrieval require the main authenticated session and a POS session bound to the same user. The POS session is established from the validated workspace login; it cannot switch cashier identity and expires no later than the workspace session.
 
 - `GET /pos/scanner/product?barcode=4006381333931` — authenticated active POS session; performs an exact barcode lookup against active products and available inventory in the cashier's branch only. It never calls an external catalogue. The POS keyboard-wedge scanner uses this local path for barcode input; ordinary typed product searches remain catalogue searches.
 
 ## Access permissions
 
 - `GET /access/modules` — administrator-only module catalog.
+- `GET /access/roles` and `PUT /access/roles/:role` — administrator-only role permission templates.
 - `GET /access/users/:id` — administrator-only individual module overrides and default landing page.
 - `PUT /access/users/:id` — administrator-only update of default landing page and module overrides.
 
 The sidebar and frontend routes consume effective modules. Backend APIs independently enforce module middleware and role middleware.
+
+The `sales` module is shown as **Transaction History**. Migration `021_transaction_history_permissions.sql` adds the granular `transaction_own`, `transaction_all`, `transaction_details`, `transaction_print`, `transaction_reprint`, `transaction_export`, `transaction_cancel`, and `transaction_refund` permissions. Cashiers default to their own history, details, printing, and reprinting; they do not default to other cashiers' records, exports, cancellations, or refunds. Administrators can change role defaults or individual user overrides.
 
 ## Dashboard and catalogue
 
@@ -267,9 +270,11 @@ Expense payment method is descriptive bookkeeping only; this endpoint does not i
 
 ## Sales and refunds
 
-- `GET /sales?q=...&from=YYYY-MM-DD&to=YYYY-MM-DD` — up to 100 recent branch receipts, filterable by receipt number, transaction ID, cashier name, and date range.
-- `GET /sales/:id` — branch-scoped receipt, item, totals, cashier, payment, and tender details.
-- `GET /pos/sales/:id/receipt` — POS-only receipt lookup restricted to the authenticated cashier's own sale; used immediately after checkout for cashier roles without Sales-module access.
+- `GET /sales?q=...&cashier=...&from=YYYY-MM-DD&to=YYYY-MM-DD&paymentMethod=...&status=...&branchId=...` — up to 500 recent transactions, with filters for receipt/ID/customer, cashier, date range, payment method, status, and (administrators only) branch. Cashiers are always restricted to their own cashier ID and branch unless an administrator grants `transaction_all`.
+- `GET /sales/:id` — transaction details, receipt data, items, totals, cashier, payment, and tender details; requires `transaction_details` and own/all transaction scope.
+- `GET /sales/:id/receipt` — receipt reprint lookup; requires `transaction_reprint` and own/all transaction scope.
+- `GET /sales/export` — CSV export using the same filters; requires `transaction_export`.
+- `GET /pos/sales/:id/receipt` — POS receipt lookup restricted to the authenticated cashier's own sale; requires transaction detail or print permission.
 - `GET /sales/held` — held sales for the authenticated cashier.
 - `POST /sales/held` — hold the current cart for later retrieval.
 - `POST /sales/held/:id/retrieve` — retrieve and remove a cashier's held sale.
@@ -277,8 +282,9 @@ Expense payment method is descriptive bookkeeping only; this endpoint does not i
 - `GET /bank-transfer-verifications/status?reference=...` — cashier checks their submitted reference status.
 - `GET /bank-transfer-verifications` — admin-only list of pending transfers for the branch.
 - `POST /bank-transfer-verifications/:id/decision` — admin-only `{ "decision": "approved" }` or `{ "decision": "rejected" }`; approve only after confirming the transfer in the bank account.
-- `GET /refunds` — recent cash refunds.
-- `POST /sales/:id/refunds` — admin or manager; records a cash refund and restores returned stock in one transaction.
+- `GET /refunds` — recent cash refunds, scoped to the user's branch and transaction visibility.
+- `POST /sales/:id/refunds` — requires `transaction_refund`; records the refund, restores returned stock, and writes an audit event in one transaction.
+- `POST /sales/:id/cancel` — requires `transaction_cancel`; cancels only pending-payment records that have no completed payment or sale stock movement, and writes an audit event.
 
 ```json
 {
@@ -287,7 +293,7 @@ Expense payment method is descriptive bookkeeping only; this endpoint does not i
 }
 ```
 
-The API rejects quantities above the unrefunded quantity and prevents total refunds from exceeding the original line amount.
+The API rejects quantities above the unrefunded quantity and prevents total refunds from exceeding the original line amount. A fully refunded sale is displayed with `refunded` status; `pending_payment` is displayed as `pending`.
 
 ## Operational notes
 

@@ -39,7 +39,10 @@ type SaleReceipt = {
     branch: string; cashReceived: string | null; changeDue: string;
   };
   business: { name: string; phone: string; address: string; logoUrl: string | null };
-  items: Array<{ id: number; sku: string; name: string; quantity: string; unitPrice: string; lineTotal: string }>;
+  items: Array<{
+    id: number; productId?: number; sku: string; name: string; quantity: string;
+    refunded?: string; unitPrice: string; taxRate?: string; lineTotal: string;
+  }>;
   payments: Array<{ method: string; amount: string; status: string; reference: string | null }>;
 };
 type BankTransferVerification = {
@@ -84,6 +87,12 @@ function PermissionRoute({ module, user, children }: { module: string; user: Use
     : <Navigate to={landing} replace />;
 }
 
+function hasTransactionHistoryAccess(user: User): boolean {
+  return user.roles.includes("admin")
+    || user.modules?.includes("transaction_own") === true
+    || user.modules?.includes("transaction_all") === true;
+}
+
 function getLandingPath(user: User): string {
   const routeMap: Record<string, string> = {
     dashboard: "/", pos: "/pos", sales: "/sales", products: "/products",
@@ -97,8 +106,10 @@ function getLandingPath(user: User): string {
   if (user.roles.includes("admin") && user.modules?.includes("dashboard")) return "/";
   const landing = user.defaultLanding;
   if (landing && Object.entries(routeMap).some(([moduleId, route]) =>
-    route === landing && user.modules?.includes(moduleId))) return landing;
-  const fallback = user.modules?.find((moduleId) => routeMap[moduleId]);
+    route === landing && user.modules?.includes(moduleId)
+      && (moduleId !== "sales" || hasTransactionHistoryAccess(user)))) return landing;
+  const fallback = user.modules?.find((moduleId) =>
+    routeMap[moduleId] && (moduleId !== "sales" || hasTransactionHistoryAccess(user)));
   return fallback ? routeMap[fallback]! : "/access-denied";
 }
 
@@ -113,7 +124,7 @@ const workspaceNavigationItems = [
   { module: "shifts", route: "/shifts", label: "Cashier shifts", icon: <Banknote size={18} aria-hidden="true" /> },
   { module: "expenses", route: "/expenses", label: "Expenses", icon: <ReceiptText size={18} aria-hidden="true" /> },
   { module: "reports", route: "/reports", label: "Reports", icon: <TrendingUp size={18} aria-hidden="true" /> },
-  { module: "sales", route: "/sales", label: "Sales & returns", icon: <RotateCcw size={18} aria-hidden="true" /> },
+  { module: "sales", route: "/sales", label: "Transaction History", icon: <ReceiptText size={18} aria-hidden="true" /> },
   { module: "branches", route: "/branches", label: "Branches", icon: <Users size={18} aria-hidden="true" /> },
   { module: "sync_monitor", route: "/sync-monitor", label: "Offline sync", icon: <RefreshCw size={18} aria-hidden="true" /> },
   { module: "backups", route: "/backups", label: "Backups", icon: <ShieldCheck size={18} aria-hidden="true" /> },
@@ -128,7 +139,8 @@ function WorkspaceNavigation({
 }: { user: User; className: string; linkClassName: string; id?: string; showShortcuts?: boolean; onNavigate?: () => void }) {
   return (
     <nav className={className} id={id} aria-label="Workspace navigation">
-      {workspaceNavigationItems.map((item) => user.modules?.includes(item.module) ? (
+      {workspaceNavigationItems.map((item) => user.modules?.includes(item.module)
+        && (item.module !== "sales" || hasTransactionHistoryAccess(user)) ? (
         <NavLink
           key={item.module}
           to={item.route}
@@ -204,7 +216,9 @@ function AuthenticatedApp() {
         <Route path="/expenses" element={<PermissionRoute module="expenses" user={me.data}><ExpensesPage user={me.data} /></PermissionRoute>} />
         <Route path="/reports" element={<PermissionRoute module="reports" user={me.data}><ReportsPage user={me.data} /></PermissionRoute>} />
         <Route path="/reports/daily" element={<PermissionRoute module="reports" user={me.data}><DailyEvaluationPage user={me.data} /></PermissionRoute>} />
-        <Route path="/sales" element={<PermissionRoute module="sales" user={me.data}><SalesPage user={me.data} /></PermissionRoute>} />
+        <Route path="/sales" element={me.data.modules?.includes("sales") && hasTransactionHistoryAccess(me.data)
+          ? <SalesPage user={me.data} />
+          : <AccessDeniedPage />} />
         <Route path="/branches" element={<PermissionRoute module="branches" user={me.data}><BranchesPage /></PermissionRoute>} />
         <Route path="/sync-monitor" element={<PermissionRoute module="sync_monitor" user={me.data}><OfflineSyncPage /></PermissionRoute>} />
         <Route path="/backups" element={<PermissionRoute module="backups" user={me.data}><BackupsPage /></PermissionRoute>} />
@@ -1923,7 +1937,7 @@ function StaffPage({ user }: { user: User }) {
   };
   const currentRole = roles.data?.find((role) => role.name === form.role);
   const availableLandings = (modules.data ?? []).filter((module) => {
-    if (module.id === "permissions") return false;
+    if (module.id === "permissions" || module.id.startsWith("transaction_")) return false;
     const assigned = moduleSelections[module.id] ?? currentRole?.permissions.find((permission) => permission.moduleId === module.id)?.allowed;
     return Boolean(assigned);
   });
@@ -2130,22 +2144,32 @@ function ReceiptDialog({
   onWidthChange,
   onClose,
   onNewSale,
+  allowPrinting = true,
 }: {
   receipt: SaleReceipt;
   width: "58mm" | "80mm";
   onWidthChange: (width: "58mm" | "80mm") => void;
   onClose: () => void;
   onNewSale?: () => void;
+  allowPrinting?: boolean;
 }) {
   const printReceipt = () => window.print();
+  const amountPaid = receipt.payments
+    .filter((payment) => payment.status === "completed")
+    .reduce((total, payment) => total + Number(payment.amount), 0);
+  const changeDue = Number(receipt.sale.changeDue);
   return <div className="receipt-backdrop">
     <section className={`receipt-dialog receipt-${width === "58mm" ? "58" : "80"}`} role="dialog" aria-modal="true" aria-label="Sale receipt">
       <div className="receipt-toolbar no-print">
         <label>Paper size<select value={width} onChange={(event) => onWidthChange(event.target.value as "58mm" | "80mm")}><option value="58mm">58 mm</option><option value="80mm">80 mm</option></select></label>
-        <button onClick={printReceipt}><Printer size={16} /> Print</button>
-        <button onClick={printReceipt}><Download size={16} /> Print / Save PDF</button>
+        {allowPrinting && <>
+          <button onClick={printReceipt}><Printer size={16} /> Print</button>
+          <button onClick={printReceipt}><Download size={16} /> Print / Save PDF</button>
+        </>}
+        {onNewSale && <button className="receipt-next-sale" onClick={onNewSale}><Plus size={16} /> Start New Sale</button>}
         <button className="receipt-close" onClick={onClose}>Close</button>
       </div>
+      {onNewSale && <div className="receipt-ready-note no-print" role="status">Receipt ready. Print it now or start your next sale.</div>}
       <article className={`receipt-paper paper-${width === "58mm" ? "58" : "80"}`}>
         <header className="receipt-brand">
           {receipt.business.logoUrl
@@ -2174,45 +2198,72 @@ function ReceiptDialog({
         <div className="receipt-payment">
           <strong>PAYMENT</strong>
           {receipt.payments.map((payment, index) => <div key={`${payment.method}-${index}`}><span>{payment.method.replaceAll("_", " ").toUpperCase()}</span><strong>{money(payment.amount)}</strong>{payment.reference && <small>Ref: {payment.reference}</small>}</div>)}
+          <div><span>Amount paid</span><strong>{money(amountPaid)}</strong></div>
           {receipt.payments.some((payment) => payment.method === "cash") && <div><span>Amount received</span><strong>{money(receipt.sale.cashReceived ?? receipt.sale.total)}</strong></div>}
-          {Number(receipt.sale.changeDue) > 0 && <div><span>Change</span><strong>{money(receipt.sale.changeDue)}</strong></div>}
+          <div><span>{changeDue > 0 ? "Change" : "Balance"}</span><strong>{money(changeDue)}</strong></div>
         </div>
         <footer className="receipt-thanks">Thank you for shopping with us!</footer>
       </article>
-      {onNewSale && <div className="receipt-new-sale no-print"><button className="button button-dark" onClick={onNewSale}>New Sale</button></div>}
     </section>
   </div>;
 }
 
 function SalesPage({ user }: { user: User }) {
   const query = useQueryClient();
-  const canRefund = user.roles.some((role) => ["admin", "manager"].includes(role));
-  const canVerifyBankTransfer = user.roles.includes("admin");
-  const [selected, setSelected] = useState<number | null>(null);
+  const isAdmin = user.roles.includes("admin");
+  const canViewAll = isAdmin || user.modules?.includes("transaction_all") === true;
+  const canViewDetails = user.modules?.includes("transaction_details") === true;
+  const canReprint = user.modules?.includes("transaction_reprint") === true;
+  const canExport = user.modules?.includes("transaction_export") === true;
+  const canCancel = user.modules?.includes("transaction_cancel") === true;
+  const canRefund = user.modules?.includes("transaction_refund") === true;
+  const canVerifyBankTransfer = isAdmin;
+  const [detailSelected, setDetailSelected] = useState<number | null>(null);
+  const [refundSelected, setRefundSelected] = useState<number | null>(null);
   const [receiptSelected, setReceiptSelected] = useState<number | null>(null);
   const [receiptWidth, setReceiptWidth] = useState<"58mm" | "80mm">("80mm");
   const [searchText, setSearchText] = useState("");
+  const [cashierFilter, setCashierFilter] = useState("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [branchId, setBranchId] = useState("");
   const [reason, setReason] = useState("");
   const [quantities, setQuantities] = useState<Record<number, string>>({});
   const [error, setError] = useState("");
-  const sales = useQuery({ queryKey: ["sales", searchText, fromDate, toDate], queryFn: async () => (await api.get<{ sales: Array<{
-    id: number; receiptNumber: string; total: string; status: string; createdAt: string;
-    cashier: string; customer: string | null; itemCount: number;
-  }> }>("/sales", { params: { q: searchText, from: fromDate, to: toDate } })).data.sales });
-  const refunds = useQuery({ queryKey: ["refunds"], queryFn: async () => (await api.get<{ refunds: Array<{
+  const filters = {
+    q: searchText, cashier: cashierFilter, from: fromDate, to: toDate,
+    paymentMethod, status: statusFilter, branchId,
+  };
+  const sales = useQuery({ queryKey: ["sales", filters], queryFn: async () => (await api.get<{ sales: Array<{
+    id: number; receiptNumber: string; branch: string; branchId: number; subtotal: string; discount: string; tax: string;
+    total: string; amountPaid: string; cashReceived: string | null; changeDue: string; status: string; createdAt: string;
+    cashierId: number; cashier: string; customer: string | null; itemCount: number; paymentMethod: string | null;
+  }> }>("/sales", { params: filters })).data.sales });
+  const branches = useQuery({
+    queryKey: ["transaction-branches"],
+    enabled: isAdmin,
+    queryFn: async () => (await api.get<{ branches: Array<{ id: number; name: string; code: string }> }>("/staff/branches")).data.branches,
+  });
+  const refunds = useQuery({ queryKey: ["refunds"], enabled: canRefund, queryFn: async () => (await api.get<{ refunds: Array<{
     id: number; refundNumber: string; receiptNumber: string; reason: string; total: string;
     createdAt: string; createdBy: string;
   }> }>("/refunds")).data.refunds });
-  const detail = useQuery({ queryKey: ["sale", selected], enabled: selected !== null, queryFn: async () => (await api.get<{
-    sale: { id: number; receiptNumber: string; total: string; status: string };
-    items: Array<{ id: number; productId: number; sku: string; name: string; quantity: string; refunded: string; lineTotal: string }>;
-  }>(`/sales/${selected}`)).data });
+  const detail = useQuery({
+    queryKey: ["sale-detail", detailSelected],
+    enabled: detailSelected !== null,
+    queryFn: async () => (await api.get<SaleReceipt>(`/sales/${detailSelected}`)).data,
+  });
+  const refundDetail = useQuery({
+    queryKey: ["sale-refund-detail", refundSelected],
+    enabled: refundSelected !== null,
+    queryFn: async () => (await api.get<SaleReceipt>(`/sales/${refundSelected}`)).data,
+  });
   const receiptQuery = useQuery({
     queryKey: ["sale-receipt", receiptSelected],
     enabled: receiptSelected !== null,
-    queryFn: async () => (await api.get<SaleReceipt>(`/sales/${receiptSelected}`)).data,
+    queryFn: async () => (await api.get<SaleReceipt>(`/sales/${receiptSelected}/receipt`)).data,
   });
   const bankVerifications = useQuery({
     queryKey: ["bank-transfer-verifications"],
@@ -2228,14 +2279,14 @@ function SalesPage({ user }: { user: User }) {
     onError: (reason) => setError(getErrorMessage(reason)),
   });
   const refund = useMutation({
-    mutationFn: () => api.post(`/sales/${selected}/refunds`, {
+    mutationFn: () => api.post(`/sales/${refundSelected}/refunds`, {
       reason,
       items: Object.entries(quantities).filter(([, quantity]) => Number(quantity) > 0)
         .map(([saleItemId, quantity]) => ({ saleItemId: Number(saleItemId), quantity })),
     }),
     onSuccess: () => {
       setError("");
-      setSelected(null);
+      setRefundSelected(null);
       setReason("");
       setQuantities({});
       void query.invalidateQueries({ queryKey: ["sales"] });
@@ -2246,16 +2297,73 @@ function SalesPage({ user }: { user: User }) {
     },
     onError: (reason) => setError(getErrorMessage(reason)),
   });
-  return <section className="page-content operations-page"><PageHeader eyebrow="TRANSACTION HISTORY" title="Sales & returns" detail="Review recent receipts and process authorized cash refunds." />
+  const cancel = useMutation({
+    mutationFn: ({ id, reason: cancelReason }: { id: number; reason: string }) =>
+      api.post(`/sales/${id}/cancel`, { reason: cancelReason }),
+    onSuccess: () => {
+      setError("");
+      void query.invalidateQueries({ queryKey: ["sales"] });
+    },
+    onError: (reason) => setError(getErrorMessage(reason)),
+  });
+  const exportTransactions = useMutation({
+    mutationFn: async () => api.get<Blob>("/sales/export", { params: filters, responseType: "blob" }),
+    onSuccess: ({ data }) => {
+      const url = URL.createObjectURL(data);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "transaction-history.csv";
+      document.body.append(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    },
+    onError: (reason) => setError(getErrorMessage(reason)),
+  });
+  const cancelTransaction = (id: number) => {
+    const cancelReason = window.prompt("Enter the reason for cancelling this pending transaction:");
+    if (cancelReason === null) return;
+    if (cancelReason.trim().length < 3) {
+      setError("Enter a cancellation reason of at least 3 characters.");
+      return;
+    }
+    setError("");
+    cancel.mutate({ id, reason: cancelReason.trim() });
+  };
+  return <section className="page-content operations-page"><PageHeader eyebrow="TRANSACTION HISTORY" title="Transaction History" detail="Search receipts, inspect items and payments, and review authorized returns." />
     {error && <ErrorBanner message={error} onRetry={() => setError("")} />}
     {sales.isError && <ErrorBanner message={getErrorMessage(sales.error)} onRetry={() => void sales.refetch()} />}
-    {refunds.isError && <ErrorBanner message={getErrorMessage(refunds.error)} onRetry={() => void refunds.refetch()} />}
-    {selected !== null && <section className="panel operation-form-panel"><div className="panel-heading"><div><div className="eyebrow">RETURN ITEMS</div><h2>Receipt {detail.data?.sale.receiptNumber ?? "…"}</h2></div><button className="small-action reject-action" onClick={() => { setSelected(null); setQuantities({}); }}>Cancel</button></div>
+    {refunds.isError && canRefund && <ErrorBanner message={getErrorMessage(refunds.error)} onRetry={() => void refunds.refetch()} />}
+    {detailSelected !== null && <section className="panel operation-form-panel">
+      <div className="panel-heading"><div><div className="eyebrow">TRANSACTION DETAILS</div><h2>Receipt {detail.data?.sale.receiptNumber ?? "…"}</h2></div><button className="small-action" onClick={() => setDetailSelected(null)}>Close</button></div>
       {detail.isError && <ErrorBanner message={getErrorMessage(detail.error)} onRetry={() => void detail.refetch()} />}
-      {detail.isPending ? <LoadingRows /> : detail.data && <form className="return-form" onSubmit={(event) => { event.preventDefault(); setError(""); refund.mutate(); }}>
+      {detail.isPending ? <LoadingRows /> : detail.data && <>
+        <div className="transaction-detail-summary">
+          <div><span>Transaction</span><strong>#{detail.data.sale.id}</strong></div>
+          <div><span>Date</span><strong>{new Date(detail.data.sale.createdAt).toLocaleString("en-KE")}</strong></div>
+          <div><span>Cashier</span><strong>{detail.data.sale.cashier}</strong></div>
+          <div><span>Customer</span><strong>{detail.data.sale.customer ?? "Walk-in"}</strong></div>
+          <div><span>Subtotal</span><strong>{money(detail.data.sale.subtotal)}</strong></div>
+          <div><span>Discount</span><strong>{money(detail.data.sale.discount)}</strong></div>
+          <div><span>Tax</span><strong>{money(detail.data.sale.tax)}</strong></div>
+          <div><span>Total</span><strong>{money(detail.data.sale.total)}</strong></div>
+          <div><span>Change</span><strong>{money(detail.data.sale.changeDue)}</strong></div>
+          <div><span>Status</span><strong>{detail.data.sale.status}</strong></div>
+        </div>
+        <div className="product-table-wrap"><table className="product-table"><thead><tr><th>PRODUCT</th><th>SKU</th><th>QUANTITY</th><th>UNIT PRICE</th><th>LINE TOTAL</th></tr></thead><tbody>
+          {detail.data.items.map((item) => <tr key={item.id}><td>{item.name}</td><td>{item.sku}</td><td>{Number(item.quantity).toLocaleString("en-KE")}</td><td>{money(item.unitPrice)}</td><td className="price-cell">{money(item.lineTotal)}</td></tr>)}
+        </tbody></table></div>
+        <div className="transaction-payment-list"><strong>Payment methods</strong>{detail.data.payments.map((payment, index) => <span key={`${payment.method}-${index}`}>{payment.method.replaceAll("_", " ")} · {money(payment.amount)} · {payment.status}</span>)}
+          <span>Cash received · {money(detail.data.sale.cashReceived ?? "0")}</span>
+        </div>
+      </>}
+    </section>}
+    {refundSelected !== null && <section className="panel operation-form-panel"><div className="panel-heading"><div><div className="eyebrow">RETURN ITEMS</div><h2>Receipt {refundDetail.data?.sale.receiptNumber ?? "…"}</h2></div><button className="small-action reject-action" onClick={() => { setRefundSelected(null); setQuantities({}); }}>Cancel</button></div>
+      {refundDetail.isError && <ErrorBanner message={getErrorMessage(refundDetail.error)} onRetry={() => void refundDetail.refetch()} />}
+      {refundDetail.isPending ? <LoadingRows /> : refundDetail.data && <form className="return-form" onSubmit={(event) => { event.preventDefault(); setError(""); refund.mutate(); }}>
         <p>Enter the quantity to return for each item. Refund is paid in cash and stock is restored after approval.</p>
-        {detail.data.items.map((item) => {
-          const remaining = Number(item.quantity) - Number(item.refunded);
+        {refundDetail.data.items.map((item) => {
+          const remaining = Number(item.quantity) - Number(item.refunded ?? 0);
           return <label className="return-item" key={item.id}><span><strong>{item.name}</strong><small>{remaining.toFixed(3)} remaining · line {money(item.lineTotal)}</small></span><input aria-label={`Quantity to return for ${item.name}`} type="number" step="0.001" min="0" max={remaining} value={quantities[item.id] ?? ""} onChange={(event) => setQuantities({ ...quantities, [item.id]: event.target.value })} /></label>;
         })}
         <label className="return-reason">Reason<input required minLength={3} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Reason for refund" /></label>
@@ -2271,14 +2379,43 @@ function SalesPage({ user }: { user: User }) {
         }
       }}>Approve verified</button><button className="small-action reject-action" disabled={reviewBankTransfer.isPending} onClick={() => reviewBankTransfer.mutate({ id: transfer.id, decision: "rejected" })}>Reject</button></td></tr>)}</tbody></table>{!bankVerifications.isPending && !bankVerifications.data?.length && <EmptyState title="No transfers awaiting review" detail="Cashiers' bank transfer verification requests will appear here." />}</div>
     </section>}
-    <section className="panel operation-table-panel"><div className="panel-heading"><div><div className="eyebrow">BRANCH RECEIPTS</div><h2>Recent sales</h2></div></div>
-      <div className="sales-search-bar"><label>Search receipts, transaction ID or cashier<input value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="Receipt number, ID, cashier" /></label><label>From<input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label><label>To<input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label></div>
-      <div className="product-table-wrap"><table className="product-table"><thead><tr><th>RECEIPT</th><th>DATE</th><th>CASHIER</th><th>CUSTOMER</th><th>ITEMS</th><th>TOTAL</th><th>ACTION</th></tr></thead><tbody>{sales.data?.map((sale) => <tr key={sale.id}><td className="sku-cell">{sale.receiptNumber}</td><td>{new Date(sale.createdAt).toLocaleString("en-KE")}</td><td>{sale.cashier}</td><td>{sale.customer ?? "Walk-in"}</td><td>{sale.itemCount}</td><td className="price-cell">{money(sale.total)}</td><td className="row-actions"><button className="small-action" onClick={() => { setReceiptSelected(sale.id); setError(""); }}>View / Reprint</button>{canRefund && sale.status === "completed" && <button className="small-action" onClick={() => { setSelected(sale.id); setError(""); }}>Return</button>}</td></tr>)}</tbody></table>{!sales.isPending && !sales.data?.length && <EmptyState title="No sales found" detail="Adjust the search or date range, or complete a checkout sale." />}</div>
+    <section className="panel operation-table-panel"><div className="products-toolbar"><div><div className="eyebrow">REGISTER TRANSACTIONS</div><h2>Sales and receipts</h2></div>
+      {canExport && <button className="button button-dark" disabled={exportTransactions.isPending} onClick={() => exportTransactions.mutate()}>{exportTransactions.isPending ? "Exporting…" : "Export CSV"}</button>}
+    </div>
+      <div className="sales-search-bar">
+        <label>Receipt, transaction or customer<input value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="Receipt number, ID, customer" /></label>
+        {canViewAll && <label>Cashier<input value={cashierFilter} onChange={(event) => setCashierFilter(event.target.value)} placeholder="Filter by cashier name" /></label>}
+        {isAdmin && <label>Branch<select value={branchId} onChange={(event) => setBranchId(event.target.value)}><option value="">All branches</option>{branches.data?.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}</select></label>}
+        <label>From<input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label>
+        <label>To<input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label>
+        <label>Payment method<select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value)}><option value="">All methods</option><option value="cash">Cash</option><option value="mpesa">M-Pesa</option><option value="card">Card</option><option value="bank_transfer">Bank transfer</option><option value="credit">Credit</option></select></label>
+        <label>Status<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="">All statuses</option><option value="completed">Completed</option><option value="pending">Pending</option><option value="cancelled">Cancelled</option><option value="refunded">Refunded</option></select></label>
+      </div>
+      <div className="product-table-wrap"><table className="product-table"><thead><tr>
+        <th>RECEIPT / ID</th><th>DATE &amp; TIME</th>{canViewAll && <th>BRANCH</th>}<th>CASHIER</th><th>CUSTOMER</th><th>PRODUCTS</th>
+        <th>SUBTOTAL</th><th>DISCOUNT</th><th>TAX</th><th>TOTAL</th><th>METHOD</th><th>AMOUNT PAID</th><th>CHANGE</th><th>STATUS</th><th>ACTIONS</th>
+      </tr></thead><tbody>{sales.data?.map((sale) => <tr key={sale.id}>
+        <td className="sku-cell">{sale.receiptNumber}<small>#{sale.id}</small></td>
+        <td>{new Date(sale.createdAt).toLocaleString("en-KE")}</td>{canViewAll && <td>{sale.branch}</td>}
+        <td>{sale.cashier}</td><td>{sale.customer ?? "Walk-in"}</td><td>{sale.itemCount}</td>
+        <td>{money(sale.subtotal)}</td><td>{money(sale.discount)}</td><td>{money(sale.tax)}</td>
+        <td className="price-cell">{money(sale.total)}</td><td>{sale.paymentMethod?.replaceAll(",", " / ") ?? "—"}</td>
+        <td>{money(sale.amountPaid)}</td><td>{money(sale.changeDue)}</td><td><span className={`product-status ${sale.status !== "completed" ? "status-low" : ""}`}><i /> {sale.status.toUpperCase()}</span></td>
+        <td className="row-actions">
+          {canViewDetails && <button className="small-action" onClick={() => { setDetailSelected(sale.id); setError(""); }}>Details</button>}
+          {canReprint && <button className="small-action" onClick={() => { setReceiptSelected(sale.id); setError(""); }}>Receipt</button>}
+          {canRefund && canViewDetails && sale.status === "completed" && <button className="small-action" onClick={() => { setRefundSelected(sale.id); setError(""); }}>Return</button>}
+          {canCancel && sale.status === "pending" && <button className="small-action reject-action" disabled={cancel.isPending} onClick={() => cancelTransaction(sale.id)}>Cancel transaction</button>}
+        </td>
+      </tr>)}</tbody></table>
+        {sales.isPending && <LoadingRows />}
+        {!sales.isPending && !sales.data?.length && <EmptyState title="No transactions found" detail="Adjust the search or filters to find another transaction." />}
+      </div>
     </section>
-    <section className="panel operation-table-panel"><div className="panel-heading"><div><div className="eyebrow">CASH REFUNDS</div><h2>Recent returns</h2></div></div>
+    {canRefund && <section className="panel operation-table-panel"><div className="panel-heading"><div><div className="eyebrow">CASH REFUNDS</div><h2>Recent returns</h2></div></div>
       <div className="product-table-wrap"><table className="product-table"><thead><tr><th>REFUND</th><th>RECEIPT</th><th>REASON</th><th>PROCESSED BY</th><th>DATE</th><th>AMOUNT</th></tr></thead><tbody>{refunds.data?.map((refund) => <tr key={refund.id}><td className="sku-cell">{refund.refundNumber}</td><td>{refund.receiptNumber}</td><td>{refund.reason}</td><td>{refund.createdBy}</td><td>{new Date(refund.createdAt).toLocaleString("en-KE")}</td><td className="price-cell">{money(refund.total)}</td></tr>)}</tbody></table>{!refunds.isPending && !refunds.data?.length && <EmptyState title="No returns recorded" detail="Processed cash refunds will appear here." />}</div>
-    </section>
-    {receiptSelected !== null && receiptQuery.data && <ReceiptDialog receipt={receiptQuery.data} width={receiptWidth} onWidthChange={setReceiptWidth} onClose={() => setReceiptSelected(null)} />}
+    </section>}
+    {receiptSelected !== null && receiptQuery.data && <ReceiptDialog receipt={receiptQuery.data} width={receiptWidth} onWidthChange={setReceiptWidth} onClose={() => setReceiptSelected(null)} allowPrinting={canReprint} />}
     {receiptSelected !== null && receiptQuery.isError && <ErrorBanner message={getErrorMessage(receiptQuery.error)} onRetry={() => void receiptQuery.refetch()} />}
   </section>;
 }
@@ -3066,6 +3203,11 @@ function PosSignOutConfirmation({
 function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: number; name: string; username: string }; onLogout: () => void }) {
   const queryClient = useQueryClient();
   const canSell = user.roles.some((role) => ["admin", "manager", "cashier"].includes(role));
+  const canViewTransactionHistory = user.modules?.includes("sales") === true
+    && (user.roles.includes("admin")
+      || user.modules?.includes("transaction_own") === true
+      || user.modules?.includes("transaction_all") === true);
+  const canViewTransactionDetails = user.modules?.includes("transaction_details") === true;
   const [posConnectionStatus, setPosConnectionStatus] = useState<"ONLINE" | "OFFLINE" | "SYNCING" | "SYNC FAILED">(
     typeof navigator !== "undefined" && navigator.onLine ? "ONLINE" : "OFFLINE",
   );
@@ -3079,6 +3221,10 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const [amountPaid, setAmountPaid] = useState("");
   const [receipt, setReceipt] = useState<SaleReceipt | null>(null);
   const [receiptWidth, setReceiptWidth] = useState<"58mm" | "80mm">("80mm");
+  const [transactionHistoryOpen, setTransactionHistoryOpen] = useState(false);
+  const [transactionSearch, setTransactionSearch] = useState("");
+  const [transactionDate, setTransactionDate] = useState("");
+  const [historyReceiptId, setHistoryReceiptId] = useState<number | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<"cash" | "bank_transfer" | "mpesa" | "split">("cash");
   const [bankReference, setBankReference] = useState("");
   const [cashAllocation, setCashAllocation] = useState("");
@@ -3175,6 +3321,26 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const activeShift = useQuery({
     queryKey: ["active-shift"],
     queryFn: async () => (await api.get<{ shift: { id: number; openingCash: string; openedAt: string; branchName: string } | null }>("/shifts/active")).data.shift,
+  });
+  const transactionHistoryFilters = {
+    q: transactionSearch.trim(),
+    from: transactionDate,
+    to: transactionDate,
+    status: "completed",
+  };
+  const transactionHistory = useQuery({
+    queryKey: ["sales", transactionHistoryFilters],
+    queryFn: async () => (await api.get<{ sales: Array<{
+      id: number; receiptNumber: string; subtotal: string; discount: string; tax: string;
+      total: string; amountPaid: string; changeDue: string; status: string; createdAt: string;
+      cashier: string; paymentMethod: string | null;
+    }> }>("/sales", { params: transactionHistoryFilters })).data.sales,
+    enabled: canViewTransactionHistory && transactionHistoryOpen,
+  });
+  const historyReceipt = useQuery({
+    queryKey: ["sale-detail", historyReceiptId],
+    queryFn: async () => (await api.get<SaleReceipt>(`/sales/${historyReceiptId}`)).data,
+    enabled: historyReceiptId !== null && canViewTransactionDetails,
   });
   const mpesaConfigQuery = useQuery({
     queryKey: ["mpesa-config"],
@@ -3350,6 +3516,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       }
       const sale = result.sale;
       setToast(`Sale ${sale.receiptNumber} completed · ${money(sale.total)}`);
+      setTransactionHistoryOpen(true);
       setCart([]);
       setSaleDiscount("0.00");
       setAmountPaid("");
@@ -3420,6 +3587,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       const { data } = await api.get<SaleReceipt>(`/pos/sales/${saleId}/receipt`);
       setReceipt(data);
       setToast(`Sale ${data.sale.receiptNumber} completed · ${money(data.sale.total)}`);
+      setTransactionHistoryOpen(true);
       setCart([]);
       setSaleDiscount("0.00");
       setAmountPaid("");
@@ -3898,6 +4066,11 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
               setPhonePairingError("");
               if (!phonePairing) createPhonePairing.mutate();
             }}><Smartphone size={17} /> Phone scanner</button>
+            {canViewTransactionHistory && <button
+              type="button"
+              aria-expanded={transactionHistoryOpen}
+              onClick={() => setTransactionHistoryOpen((open) => !open)}
+            ><ReceiptText size={17} /> {transactionHistoryOpen ? "Hide history" : "Transaction history"}</button>}
           </div>
           {heldSalesQuery.data?.length ? <div className="pos-held-strip">
             {heldSalesQuery.data.map((sale) => <button key={sale.id} onClick={() => retrieveHeldSaleMutation.mutate(sale.id)}>
@@ -3961,6 +4134,54 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
                   : <div className="shift-needed"><span>Start a cashier shift.</span><label>Opening cash<input value={openingCash} inputMode="decimal" onChange={(event) => setOpeningCash(event.target.value)} /></label><button className="shift-open-button" onClick={() => openShiftMutation.mutate()}>{openShiftMutation.isPending ? "Opening…" : "Open shift"}</button></div>}
         </aside>
       </div>
+      {canViewTransactionHistory && transactionHistoryOpen && <section className="pos-history-panel" aria-labelledby="pos-history-title">
+        <div className="pos-history-heading">
+          <div><span>RECENT SALES</span><h2 id="pos-history-title">Transaction History</h2></div>
+          <div className="pos-history-filters">
+            <label><span>Receipt number</span><input
+              type="search"
+              value={transactionSearch}
+              onChange={(event) => setTransactionSearch(event.target.value)}
+              placeholder="Search receipt"
+              aria-label="Search transaction history by receipt number"
+            /></label>
+            <label><span>Transaction date</span><input
+              type="date"
+              value={transactionDate}
+              onChange={(event) => setTransactionDate(event.target.value)}
+              aria-label="Filter transaction history by date"
+            /></label>
+          </div>
+        </div>
+        {transactionHistory.isError && <ErrorBanner
+          message={getErrorMessage(transactionHistory.error)}
+          onRetry={() => void transactionHistory.refetch()}
+        />}
+        {historyReceipt.isError && <ErrorBanner
+          message={getErrorMessage(historyReceipt.error)}
+          onRetry={() => void historyReceipt.refetch()}
+        />}
+        {historyReceiptId !== null && historyReceipt.isPending && <div className="pos-history-loading" role="status">Loading receipt…</div>}
+        <div className="pos-history-table-wrap">
+          <table className="pos-history-table">
+            <thead><tr><th>RECEIPT</th><th>DATE / TIME</th><th>PAYMENT</th><th>TOTAL</th><th>ACTION</th></tr></thead>
+            <tbody>{transactionHistory.data?.map((sale) => <tr key={sale.id}>
+              <td><strong>{sale.receiptNumber}</strong></td>
+              <td>{new Date(sale.createdAt).toLocaleString("en-KE")}</td>
+              <td>{sale.paymentMethod?.replaceAll(",", " / ").replaceAll("_", " ") ?? "—"}</td>
+              <td>{money(sale.total)}</td>
+              <td>{canViewTransactionDetails && <button
+                type="button"
+                className="small-action"
+                onClick={() => setHistoryReceiptId(sale.id)}
+              >View details / receipt</button>}</td>
+            </tr>)}</tbody>
+          </table>
+          {transactionHistory.isPending && <div className="pos-history-loading">Loading transactions…</div>}
+          {!transactionHistory.isPending && !transactionHistory.isError && !transactionHistory.data?.length
+            && <EmptyState title="No completed transactions" detail="Completed sales for this account will appear here." />}
+        </div>
+      </section>}
       <footer className="pos-statusbar">
         <span><i /> Ready for new sale...</span>
         <time>{new Date().toLocaleString("en-KE")}</time>
@@ -4090,6 +4311,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
         width={receiptWidth}
         onWidthChange={setReceiptWidth}
         onClose={() => setReceipt(null)}
+        allowPrinting={user.modules?.includes("transaction_print") === true}
         onNewSale={() => {
           setReceipt(null);
           setCart([]);
@@ -4098,6 +4320,13 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
           setCheckoutError("");
           window.requestAnimationFrame(() => scannerRef.current?.focus());
         }}
+      />}
+      {historyReceipt.data && <ReceiptDialog
+        receipt={historyReceipt.data}
+        width={receiptWidth}
+        onWidthChange={setReceiptWidth}
+        onClose={() => setHistoryReceiptId(null)}
+        allowPrinting={user.modules?.includes("transaction_reprint") === true}
       />}
     </section>
   );

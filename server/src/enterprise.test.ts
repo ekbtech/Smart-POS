@@ -1,5 +1,13 @@
-import { describe, expect, it } from "vitest";
-import { dailyEvaluationQuerySchema, getDailyEvaluation } from "./enterprise.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { AuthUser } from "./auth.js";
+import { dailyEvaluationQuerySchema, getDailyEvaluation, listElectronicReceipts } from "./enterprise.js";
+
+const { executeMock } = vi.hoisted(() => ({ executeMock: vi.fn() }));
+
+vi.mock("./db.js", () => ({
+  pool: { execute: executeMock },
+  withTransaction: vi.fn(),
+}));
 
 const user = {
   id: 1,
@@ -24,5 +32,48 @@ describe("daily evaluation access and filters", () => {
   it("rejects impossible dates before querying the database", async () => {
     await expect(getDailyEvaluation(user, "2025-02-30"))
       .rejects.toMatchObject({ status: 400 });
+  });
+});
+
+const cashier: AuthUser = {
+  id: 12,
+  name: "Riley Cashier",
+  email: "riley@example.test",
+  branchId: 3,
+  roles: ["cashier"],
+  modules: ["receipts", "transaction_own"],
+};
+
+describe("electronic receipt access", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    executeMock.mockResolvedValueOnce([[]]);
+  });
+
+  it("limits cashier receipts to their authenticated account and branch", async () => {
+    await listElectronicReceipts(cashier);
+
+    const [sql, parameters] = executeMock.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain("er.branch_id=?");
+    expect(sql).toContain("s.cashier_id=?");
+    expect(parameters).toEqual([3, 12]);
+  });
+
+  it("allows all-transaction permission to see other cashiers in the assigned branch", async () => {
+    await listElectronicReceipts({
+      ...cashier,
+      modules: [...(cashier.modules ?? []), "transaction_all"],
+    });
+
+    const [sql, parameters] = executeMock.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain("er.branch_id=?");
+    expect(sql).not.toContain("s.cashier_id=?");
+    expect(parameters).toEqual([3]);
+  });
+
+  it("rejects users without transaction-history visibility", async () => {
+    await expect(listElectronicReceipts({ ...cashier, modules: ["receipts"] }))
+      .rejects.toMatchObject({ status: 403 });
+    expect(executeMock).not.toHaveBeenCalled();
   });
 });

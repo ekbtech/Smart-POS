@@ -145,9 +145,18 @@ export const refundSchema = z.object({
       }
     }),
 }).strict();
+export const cancelSaleSchema = z.object({
+  reason: z.string().trim().min(3).max(500),
+}).strict();
 
 type OperationUser = AuthUser;
 type InventoryRow = RowDataPacket & { product_id: number; on_hand: string; reserved: string };
+
+function canAccessTransaction(user: OperationUser, branchId: number, cashierId: number): boolean {
+  if (user.roles.includes("admin")) return true;
+  return branchId === user.branchId
+    && (user.modules?.includes("transaction_all") === true || cashierId === user.id);
+}
 
 async function writeAudit(
   connection: PoolConnection,
@@ -1285,12 +1294,16 @@ export async function createRefund(
   user: OperationUser,
 ) {
   return withTransaction(async (connection) => {
-    const [sales] = await connection.execute<Array<RowDataPacket & { id: number; branch_id: number; status: string; receipt_number: string }>>(
-      "SELECT id, branch_id, status, receipt_number FROM sales WHERE id = ? FOR UPDATE",
+    const [sales] = await connection.execute<Array<RowDataPacket & {
+      id: number; branch_id: number; cashier_id: number; status: string; receipt_number: string;
+    }>>(
+      "SELECT id, branch_id, cashier_id, status, receipt_number FROM sales WHERE id = ? FOR UPDATE",
       [saleId],
     );
     const sale = sales[0];
-    if (!sale || sale.branch_id !== user.branchId) throw new HttpError(404, "Sale not found.");
+    if (!sale || !canAccessTransaction(user, sale.branch_id, sale.cashier_id)) {
+      throw new HttpError(404, "Sale not found.");
+    }
     if (sale.status !== "completed") throw new HttpError(409, "Only completed sales can be returned.");
 
     const refundNumber = `RF-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${randomUUID().slice(0, 6).toUpperCase()}`;
@@ -1326,7 +1339,7 @@ export async function createRefund(
     const total = refundLines.reduce((sum, line) => sum.plus(line.amount), new Decimal(0)).toDecimalPlaces(2);
     const [result] = await connection.execute(
       "INSERT INTO refunds (sale_id, branch_id, refund_number, reason, total, status, created_by) VALUES (?, ?, ?, ?, ?, 'completed', ?)",
-      [saleId, user.branchId, refundNumber, input.reason, total.toFixed(2), user.id],
+      [saleId, sale.branch_id, refundNumber, input.reason, total.toFixed(2), user.id],
     );
     const refundId = (result as { insertId: number }).insertId;
     for (const line of refundLines) {
@@ -1334,24 +1347,24 @@ export async function createRefund(
         "INSERT INTO refund_items (refund_id, sale_item_id, product_id, quantity, amount, net_amount) VALUES (?, ?, ?, ?, ?, ?)",
         [refundId, line.saleItemId, line.productId, line.quantity.toFixed(3), line.amount.toFixed(2), line.netAmount.toFixed(2)],
       );
-      await restoreSaleBatches(connection, user.branchId, line.productId, line.saleItemId, line.quantity);
+      await restoreSaleBatches(connection, sale.branch_id, line.productId, line.saleItemId, line.quantity);
       await connection.execute(
         "INSERT INTO inventory (branch_id, product_id, on_hand) VALUES (?, ?, 0) ON DUPLICATE KEY UPDATE product_id = VALUES(product_id)",
-        [user.branchId, line.productId],
+        [sale.branch_id, line.productId],
       );
       const [stockRows] = await connection.execute<InventoryRow[]>(
         "SELECT product_id, on_hand, reserved FROM inventory WHERE branch_id = ? AND product_id = ? FOR UPDATE",
-        [user.branchId, line.productId],
+        [sale.branch_id, line.productId],
       );
       if (!stockRows[0]) throw new Error("Inventory row could not be locked.");
       const newOnHand = new Decimal(stockRows[0].on_hand).plus(line.quantity);
       await connection.execute("UPDATE inventory SET on_hand = ? WHERE branch_id = ? AND product_id = ?", [
-        newOnHand.toFixed(3), user.branchId, line.productId,
+        newOnHand.toFixed(3), sale.branch_id, line.productId,
       ]);
       await connection.execute(
         `INSERT INTO stock_movements (branch_id, product_id, movement_type, quantity, reference, created_by)
          VALUES (?, ?, 'return', ?, ?, ?)`,
-        [user.branchId, line.productId, line.quantity.toFixed(3), refundNumber, user.id],
+        [sale.branch_id, line.productId, line.quantity.toFixed(3), refundNumber, user.id],
       );
     }
     await writeAudit(connection, user.id, "sale.refunded", "sale", saleId, {
@@ -1361,7 +1374,62 @@ export async function createRefund(
   });
 }
 
-export async function listRefunds(branchId: number) {
+export async function cancelPendingSale(
+  saleId: number,
+  input: z.infer<typeof cancelSaleSchema>,
+  user: OperationUser,
+) {
+  return withTransaction(async (connection) => {
+    const [sales] = await connection.execute<Array<RowDataPacket & {
+      id: number; branch_id: number; cashier_id: number; status: string; receipt_number: string;
+    }>>(
+      "SELECT id, branch_id, cashier_id, status, receipt_number FROM sales WHERE id = ? FOR UPDATE",
+      [saleId],
+    );
+    const sale = sales[0];
+    if (!sale || !canAccessTransaction(user, sale.branch_id, sale.cashier_id)) {
+      throw new HttpError(404, "Sale not found.");
+    }
+    if (sale.status !== "pending_payment") {
+      throw new HttpError(409, "Only pending-payment transactions with no completed stock or payment activity can be cancelled.");
+    }
+    const [payments] = await connection.execute<Array<RowDataPacket & { count: number }>>(
+      "SELECT COUNT(*) AS count FROM sale_payments WHERE sale_id = ? AND status = 'completed'",
+      [saleId],
+    );
+    const [stockMovements] = await connection.execute<Array<RowDataPacket & { count: number }>>(
+      "SELECT COUNT(*) AS count FROM stock_movements WHERE sale_id = ? AND movement_type = 'sale'",
+      [saleId],
+    );
+    if (Number(payments[0]?.count ?? 0) > 0 || Number(stockMovements[0]?.count ?? 0) > 0) {
+      throw new HttpError(409, "This transaction has completed payment or stock activity and cannot be cancelled.");
+    }
+    const [updated] = await connection.execute(
+      "UPDATE sales SET status = 'cancelled' WHERE id = ? AND status = 'pending_payment'",
+      [saleId],
+    );
+    if ((updated as { affectedRows: number }).affectedRows !== 1) {
+      throw new HttpError(409, "This transaction could not be cancelled.");
+    }
+    await writeAudit(connection, user.id, "sale.cancelled", "sale", saleId, {
+      receiptNumber: sale.receipt_number, reason: input.reason,
+    });
+    return { id: saleId, status: "cancelled" as const };
+  });
+}
+
+export async function listRefunds(user: OperationUser) {
+  const conditions: string[] = [];
+  const parameters: number[] = [];
+  if (!user.roles.includes("admin")) {
+    conditions.push("r.branch_id = ?");
+    parameters.push(user.branchId);
+    if (user.modules?.includes("transaction_all") !== true) {
+      conditions.push("s.cashier_id = ?");
+      parameters.push(user.id);
+    }
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   return query<Array<{
     id: number; sale_id: number; refund_number: string; reason: string; total: string; created_at: Date;
     receipt_number: string; created_by_name: string;
@@ -1369,7 +1437,7 @@ export async function listRefunds(branchId: number) {
     `SELECT r.id, r.sale_id, r.refund_number, r.reason, r.total, r.created_at,
             s.receipt_number, u.name AS created_by_name
      FROM refunds r JOIN sales s ON s.id = r.sale_id JOIN users u ON u.id = r.created_by
-     WHERE r.branch_id = ? ORDER BY r.created_at DESC LIMIT 100`,
-    [branchId],
+     ${where} ORDER BY r.created_at DESC LIMIT 100`,
+    parameters,
   );
 }
