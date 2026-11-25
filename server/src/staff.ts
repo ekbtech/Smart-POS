@@ -20,6 +20,11 @@ export const manageableModuleIds = new Set([
   "transaction_own", "transaction_all", "transaction_details", "transaction_print",
   "transaction_reprint", "transaction_export", "transaction_cancel", "transaction_refund",
 ]);
+const userGrantedTransactionModuleIds = new Set([
+  "sales", "transaction_own", "transaction_all", "transaction_details",
+  "transaction_print", "transaction_reprint", "transaction_export",
+  "transaction_cancel", "transaction_refund",
+]);
 export const landingModuleIds = new Set(
   [...manageableModuleIds].filter((moduleId) => !moduleId.startsWith("transaction_")),
 );
@@ -485,6 +490,9 @@ export async function updateRolePermissions(
 ) {
   if (!staffRoles.includes(roleName as (typeof staffRoles)[number])) throw new HttpError(404, "Role not found.");
   if (roleName === "admin") throw new HttpError(409, "Administrator access cannot be reduced here.");
+  if (permissions.some(({ moduleId, allowed }) => allowed && userGrantedTransactionModuleIds.has(moduleId))) {
+    throw new HttpError(409, "Transaction History permissions must be granted to individual users.");
+  }
   return withTransaction(async (connection) => {
     await validateModuleIds(connection, permissions);
     const [roles] = await connection.execute<Array<RowDataPacket & { id: number }>>(

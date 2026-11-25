@@ -45,7 +45,7 @@ POS sales, held-sale listing, hold and retrieval require the main authenticated 
 
 The sidebar and frontend routes consume effective modules. Backend APIs independently enforce module middleware and role middleware.
 
-The `sales` module is shown as **Transaction History**. Migration `021_transaction_history_permissions.sql` adds the granular `transaction_own`, `transaction_all`, `transaction_details`, `transaction_print`, `transaction_reprint`, `transaction_export`, `transaction_cancel`, and `transaction_refund` permissions. Cashiers default to their own history, details, printing, and reprinting; they do not default to other cashiers' records, exports, cancellations, or refunds. Administrators can change role defaults or individual user overrides.
+The `sales` module is shown as **Transaction History** in the administrator module and permission editors. Migration `021_transaction_history_permissions.sql` adds granular transaction permissions. Migration `022_admin_granted_transaction_history.sql` disables inherited Transaction History and transaction-action permissions for every non-admin role. Administrators grant history access per user by allowing `sales` and either `transaction_own` or `transaction_all`; `transaction_details` is also required to open a transaction receipt. Other transaction actions can be granted individually. Explicit user permission overrides are preserved.
 
 ## Dashboard and catalogue
 
@@ -274,7 +274,7 @@ Expense payment method is descriptive bookkeeping only; this endpoint does not i
 - `GET /sales/:id` — transaction details, receipt data, items, totals, cashier, payment, and tender details; requires `transaction_details` and own/all transaction scope.
 - `GET /sales/:id/receipt` — receipt reprint lookup; requires `transaction_reprint` and own/all transaction scope.
 - `GET /sales/export` — CSV export using the same filters; requires `transaction_export`.
-- `GET /pos/sales/:id/receipt` — POS receipt lookup restricted to the authenticated cashier's own sale; requires transaction detail or print permission.
+- `GET /pos/sales/:id/receipt` — POS receipt lookup restricted to the authenticated POS user and branch.
 - `GET /sales/held` — held sales for the authenticated cashier.
 - `POST /sales/held` — hold the current cart for later retrieval.
 - `POST /sales/held/:id/retrieve` — retrieve and remove a cashier's held sale.

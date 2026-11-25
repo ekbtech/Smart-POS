@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { AuthUser } from "./auth.js";
-import { canAssignStaffRole, createStaffSchema, resetStaffPasswordSchema, staffStatusSchema } from "./staff.js";
+import {
+  canAssignStaffRole, createStaffSchema, resetStaffPasswordSchema, staffStatusSchema, updateRolePermissions,
+} from "./staff.js";
 
 const actor = (roles: string[]): AuthUser => ({
   id: 1,
@@ -60,6 +62,15 @@ describe("staff management validation", () => {
     expect(canAssignStaffRole(actor(["manager"]), "admin")).toBe(false);
     expect(canAssignStaffRole(actor(["admin"]), "manager")).toBe(true);
     expect(canAssignStaffRole(actor(["admin"]), "admin")).toBe(true);
+  });
+
+  it("requires transaction-history access to be granted per user instead of by role", async () => {
+    await expect(updateRolePermissions("cashier", [
+      { moduleId: "sales", allowed: true },
+    ], actor(["admin"]))).rejects.toMatchObject({ status: 409 });
+    await expect(updateRolePermissions("manager", [
+      { moduleId: "transaction_all", allowed: true },
+    ], actor(["admin"]))).rejects.toMatchObject({ status: 409 });
   });
 
   it("accepts only explicit boolean account status changes", () => {

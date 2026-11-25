@@ -2028,11 +2028,11 @@ function StaffPage({ user }: { user: User }) {
       <div className="products-toolbar"><div><div className="eyebrow">ROLE-BASED ACCESS</div><h2>Default role permissions</h2></div>
         <select value={roleName} onChange={(event) => { setRoleName(event.target.value); setRoleDraft({}); }} aria-label="Select role">{roles.data?.map((role) => <option key={role.name} value={role.name}>{role.name.replaceAll("_", " ")}</option>)}</select>
       </div>
-      <p className="role-management-note">User-specific allow or deny settings override these defaults. Administrator access cannot be reduced here.</p>
+      <p className="role-management-note">User-specific allow or deny settings override these defaults. Transaction History access is granted per user, not by role. Administrator access cannot be reduced here.</p>
       {roles.isPending ? <LoadingRows /> : <div className="permission-matrix role-matrix">
         {rolePermissions.map((permission) => <label key={permission.moduleId}>
           <span>{permission.name}<small>{permission.route}</small></span>
-          <input type="checkbox" checked={roleDraft[permission.moduleId] ?? permission.allowed} disabled={roleName === "admin"} onChange={(event) => setRoleDraft({ ...roleDraft, [permission.moduleId]: event.target.checked })} />
+          <input type="checkbox" checked={roleDraft[permission.moduleId] ?? permission.allowed} disabled={roleName === "admin" || permission.moduleId === "sales" || permission.moduleId.startsWith("transaction_")} onChange={(event) => setRoleDraft({ ...roleDraft, [permission.moduleId]: event.target.checked })} />
         </label>)}
       </div>}
       <button className="button button-dark" disabled={saveRole.isPending || roleName === "admin" || roles.isPending} onClick={() => saveRole.mutate()}>
