@@ -17,6 +17,7 @@ export const manageableModuleIds = new Set([
   "dashboard", "pos", "sales", "products", "inventory", "purchases", "suppliers",
   "customers", "expenses", "shifts", "reports", "permissions",
   "branches", "sync_monitor", "backups", "price_history", "notifications", "receipts", "comparisons",
+  "cashier_monitoring",
   "transaction_own", "transaction_all", "transaction_details", "transaction_print",
   "transaction_reprint", "transaction_export", "transaction_cancel", "transaction_refund",
 ]);

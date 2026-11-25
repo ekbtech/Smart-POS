@@ -24,6 +24,7 @@ Revokes the server-side session and clears the cookie.
 
 - `POST /pos/login` — database-backed POS cashier login. Requires a four-character minimum username and password. Five incorrect attempts temporarily lock the account for 15 minutes.
 - `GET /pos/session` — verifies the dedicated two-hour POS session. Requires the main application session and authorized cashier role.
+- `POST /pos/heartbeat` — refreshes POS presence; `{ "active": true }` also updates last activity, while an idle heartbeat keeps the session online without marking the cashier active.
 - `POST /pos/logout` — revokes the dedicated POS session and records a POS logout audit event.
 - `POST /pos/scanner/pairing` — create a one-time phone scanner QR pairing for the active POS session.
 - `POST /products/scanner/pairing` — administrator, manager, or inventory manager with Products access; create a one-time phone pairing scoped to the current authenticated product-registration session.
@@ -46,6 +47,8 @@ POS sales, held-sale listing, hold and retrieval require the main authenticated 
 The sidebar and frontend routes consume effective modules. Backend APIs independently enforce module middleware and role middleware.
 
 The `sales` module is shown as **Transaction History** in the administrator module and permission editors. Migration `021_transaction_history_permissions.sql` adds granular transaction permissions. Migration `022_admin_granted_transaction_history.sql` disables inherited Transaction History and transaction-action permissions for every non-admin role. Administrators grant history access per user by allowing `sales` and either `transaction_own` or `transaction_all`; `transaction_details` is also required to open a transaction receipt. Other transaction actions can be granted individually. Explicit user permission overrides are preserved.
+
+Migration `023_live_cashier_monitoring.sql` adds the **Live Cashier Monitoring** module, shift counter/till number, and POS activity timestamps. Admins can monitor all branches; authorized managers are limited to their assigned branch. `GET /cashier-monitoring` accepts `scope=shift|today|custom`, optional `from`/`to`, and branch, cashier, and counter filters. `GET /cashier-monitoring/cashiers/:id` returns current open-shift details and transactions; `GET /cashier-monitoring/sales/:id` returns a monitored receipt and item breakdown. The dashboard polls every 10 seconds. Only completed sales and completed payment/refund records contribute to financial totals; pending and cancelled sales are excluded. Set `CASHIER_PRESENCE_TIMEOUT_SECONDS` (30–900, default 90) and `CASHIER_IDLE_TIMEOUT_SECONDS` (60–3600, default 300) to configure presence and idle status.
 
 ## Dashboard and catalogue
 

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowDownLeft, ArrowLeftRight, ArrowUpDown, ArrowUpRight, Boxes, CalendarDays, Camera, CameraOff, ChevronDown, CircleDollarSign,
+  Activity, ArrowDownLeft, ArrowLeftRight, ArrowUpDown, ArrowUpRight, Boxes, CalendarDays, Camera, CameraOff, ChevronDown, CircleDollarSign,
   Command, LayoutDashboard, LogOut, Menu, PackagePlus, Plus, Search, ShieldCheck,
   ShoppingBasket, ShoppingCart, TrendingUp, X, Users, Truck, Banknote, ReceiptText, RotateCcw, Download,
   Pause, Printer, QrCode, RefreshCw, ScanBarcode, Smartphone, Trash2, Upload,
@@ -22,6 +22,9 @@ import { listOfflineSales, removeOfflineSale, saveOfflineSale, updateOfflineSale
 
 const ReportsCharts = lazy(() => import("./ReportsCharts"));
 const DashboardSalesChart = lazy(() => import("./DashboardSalesChart"));
+const CashierMonitoringPage = lazy(() => import("./CashierMonitoringPage"));
+const LiveCashierSummary = lazy(() => import("./CashierMonitoringPage")
+  .then((module) => ({ default: module.LiveCashierSummary })));
 
 const money = (value: string | number) => new Intl.NumberFormat("en-KE", {
   style: "currency", currency: "KES", maximumFractionDigits: 2,
@@ -122,6 +125,7 @@ const workspaceNavigationItems = [
   { module: "suppliers", route: "/suppliers", label: "Suppliers", icon: <Users size={18} aria-hidden="true" /> },
   { module: "customers", route: "/customers", label: "Customers", icon: <Users size={18} aria-hidden="true" /> },
   { module: "shifts", route: "/shifts", label: "Cashier shifts", icon: <Banknote size={18} aria-hidden="true" /> },
+  { module: "cashier_monitoring", route: "/cashier-monitor", label: "Live cashiers", icon: <Activity size={18} aria-hidden="true" /> },
   { module: "expenses", route: "/expenses", label: "Expenses", icon: <ReceiptText size={18} aria-hidden="true" /> },
   { module: "reports", route: "/reports", label: "Reports", icon: <TrendingUp size={18} aria-hidden="true" /> },
   { module: "sales", route: "/sales", label: "Transaction History", icon: <ReceiptText size={18} aria-hidden="true" /> },
@@ -140,6 +144,7 @@ function WorkspaceNavigation({
   return (
     <nav className={className} id={id} aria-label="Workspace navigation">
       {workspaceNavigationItems.map((item) => user.modules?.includes(item.module)
+        && (item.module !== "cashier_monitoring" || user.roles.some((role) => ["admin", "manager"].includes(role)))
         && (item.module !== "sales" || hasTransactionHistoryAccess(user)) ? (
         <NavLink
           key={item.module}
@@ -213,6 +218,9 @@ function AuthenticatedApp() {
         <Route path="/customers" element={<PermissionRoute module="customers" user={me.data}><CustomersPage user={me.data} /></PermissionRoute>} />
         <Route path="/staff" element={<AdminPermissionRoute user={me.data}><StaffPage user={me.data} /></AdminPermissionRoute>} />
         <Route path="/shifts" element={<PermissionRoute module="shifts" user={me.data}><ShiftsPage user={me.data} /></PermissionRoute>} />
+        <Route path="/cashier-monitor" element={me.data.modules?.includes("cashier_monitoring") && me.data.roles.some((role) => ["admin", "manager"].includes(role))
+          ? <Suspense fallback={<div className="boot-screen">Loading cashier monitoring…</div>}><CashierMonitoringPage user={me.data} /></Suspense>
+          : <AccessDeniedPage />} />
         <Route path="/expenses" element={<PermissionRoute module="expenses" user={me.data}><ExpensesPage user={me.data} /></PermissionRoute>} />
         <Route path="/reports" element={<PermissionRoute module="reports" user={me.data}><ReportsPage user={me.data} /></PermissionRoute>} />
         <Route path="/reports/daily" element={<PermissionRoute module="reports" user={me.data}><DailyEvaluationPage user={me.data} /></PermissionRoute>} />
@@ -361,7 +369,7 @@ function AppShell({ user }: { user: User }) {
   const pageLabels: Record<string, string> = {
     "/inventory": "Inventory", "/suppliers": "Suppliers", "/purchases": "Purchasing",
     "/customers": "Customers", "/shifts": "Cashier shifts", "/expenses": "Expenses", "/sales": "Sales & returns",
-    "/staff": "User management", "/reports": "Reports",
+    "/staff": "User management", "/reports": "Reports", "/cashier-monitor": "Live cashiers",
   };
   const pageLabel = pageLabels[location.pathname];
   return (
@@ -452,6 +460,8 @@ function DashboardPage({ user }: { user: User }) {
           </div>
         </div>
       )}
+      {user.modules?.includes("cashier_monitoring") && user.roles.some((role) => ["admin", "manager"].includes(role))
+        && <Suspense fallback={<section className="panel cashier-monitor-summary"><div className="loading-rows">Loading live cashiers…</div></section>}><LiveCashierSummary /></Suspense>}
       <div className="metric-grid">
         <MetricCard label="TODAY'S SALES" value={data ? money(data.todaySales) : "—"} caption={`${data?.todayTransactions ?? 0} completed transactions`} icon={<CircleDollarSign size={19} />} tone="green" loading={summary.isPending} />
         <MetricCard label="TRANSACTIONS TODAY" value={data ? String(data.todayTransactions) : "—"} caption="Completed sales today" icon={<ShoppingBasket size={19} />} loading={summary.isPending} />
@@ -2077,13 +2087,14 @@ function CustomersPage({ user }: { user: User }) {
 function ShiftsPage({ user }: { user: User }) {
   const query = useQueryClient();
   const [openingCash, setOpeningCash] = useState("0.00");
+  const [counterNumber, setCounterNumber] = useState("");
   const [actualCash, setActualCash] = useState("");
   const [movement, setMovement] = useState({ type: "deposit", amount: "", description: "" });
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const active = useQuery({ queryKey: ["active-shift"], queryFn: async () => (await api.get<{ shift: { id: number; openingCash: string; openedAt: string } | null }>("/shifts/active")).data.shift });
+  const active = useQuery({ queryKey: ["active-shift"], queryFn: async () => (await api.get<{ shift: { id: number; openingCash: string; openedAt: string; counterNumber: string | null } | null }>("/shifts/active")).data.shift });
   const refresh = () => { void query.invalidateQueries({ queryKey: ["active-shift"] }); void query.invalidateQueries({ queryKey: ["dashboard"] }); };
-  const open = useMutation({ mutationFn: () => api.post("/shifts/open", { openingCash }), onSuccess: () => { setError(""); setNotice(""); refresh(); }, onError: (reason) => setError(getErrorMessage(reason)) });
+  const open = useMutation({ mutationFn: () => api.post("/shifts/open", { openingCash, counterNumber }), onSuccess: () => { setError(""); setNotice(""); refresh(); }, onError: (reason) => setError(getErrorMessage(reason)) });
   const cashMove = useMutation({ mutationFn: () => api.post("/shifts/cash-movements", movement), onSuccess: () => { setMovement({ ...movement, amount: "", description: "" }); setError(""); }, onError: (reason) => setError(getErrorMessage(reason)) });
   const close = useMutation({ mutationFn: () => api.post("/shifts/close", { actualCash }), onSuccess: (response) => { const result = response.data as { expected: string; variance: string }; setNotice(`Shift closed. Expected ${money(result.expected)}; variance ${money(result.variance)}.`); setError(""); setActualCash(""); refresh(); }, onError: (reason) => setError(getErrorMessage(reason)) });
   const canOperate = user.roles.some((role) => ["admin", "manager", "cashier"].includes(role));
@@ -2096,8 +2107,9 @@ function ShiftsPage({ user }: { user: User }) {
       {active.data ? <div className="shift-detail">
         <div><small>OPENING CASH</small><strong>{money(active.data.openingCash)}</strong></div>
         <div><small>OPENED</small><strong>{new Date(active.data.openedAt).toLocaleString("en-KE")}</strong></div>
+        <div><small>COUNTER / TILL</small><strong>{active.data.counterNumber || "Not assigned"}</strong></div>
         {canOperate && <form className="inline-form" onSubmit={(event) => { event.preventDefault(); close.mutate(); }}><label>Actual cash in drawer<input required inputMode="decimal" value={actualCash} onChange={(event) => setActualCash(event.target.value)} placeholder="Count drawer and enter amount" /></label><button className="button button-dark" disabled={close.isPending}>{close.isPending ? "Reconciling…" : "Reconcile & close shift"}</button></form>}
-      </div> : canOperate && <form className="operation-form" onSubmit={(event) => { event.preventDefault(); open.mutate(); }}><label>Opening float (KES)<input required inputMode="decimal" value={openingCash} onChange={(event) => setOpeningCash(event.target.value)} /></label><button className="button button-dark" disabled={open.isPending}>{open.isPending ? "Opening…" : "Open cashier shift"}</button></form>}
+      </div> : canOperate && <form className="operation-form" onSubmit={(event) => { event.preventDefault(); open.mutate(); }}><label>Opening float (KES)<input required inputMode="decimal" value={openingCash} onChange={(event) => setOpeningCash(event.target.value)} /></label><label>Counter / till number<input maxLength={40} value={counterNumber} onChange={(event) => setCounterNumber(event.target.value)} placeholder="Optional" /></label><button className="button button-dark" disabled={open.isPending}>{open.isPending ? "Opening…" : "Open cashier shift"}</button></form>}
     </section>
     {active.data && <section className="panel operation-form-panel"><div className="panel-heading"><div><div className="eyebrow">DRAWER ACTIVITY</div><h2>Record cash movement</h2></div></div><form className="operation-form" onSubmit={(event) => { event.preventDefault(); cashMove.mutate(); }}>
       <label>Movement<select value={movement.type} onChange={(event) => setMovement({ ...movement, type: event.target.value })}><option value="deposit">Cash in</option><option value="withdrawal">Cash out</option></select></label>
@@ -3211,6 +3223,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const [posConnectionStatus, setPosConnectionStatus] = useState<"ONLINE" | "OFFLINE" | "SYNCING" | "SYNC FAILED">(
     typeof navigator !== "undefined" && navigator.onLine ? "ONLINE" : "OFFLINE",
   );
+  const [presenceHeartbeatFailed, setPresenceHeartbeatFailed] = useState(false);
   const [pendingOfflineCount, setPendingOfflineCount] = useState(0);
   const [search, setSearch] = useState("");
   const [cart, setCart] = useState<PosCartLine[]>([]);
@@ -3218,6 +3231,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const [toast, setToast] = useState("");
   const [checkoutError, setCheckoutError] = useState("");
   const [openingCash, setOpeningCash] = useState("0.00");
+  const [counterNumber, setCounterNumber] = useState("");
   const [amountPaid, setAmountPaid] = useState("");
   const [receiptWidth, setReceiptWidth] = useState<"58mm" | "80mm">("80mm");
   const [transactionHistoryOpen, setTransactionHistoryOpen] = useState(false);
@@ -3246,6 +3260,8 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const [phonePairingError, setPhonePairingError] = useState("");
   const scannerRef = useRef<HTMLInputElement>(null);
   const saleTableRef = useRef<HTMLDivElement>(null);
+  const lastPosActivityRef = useRef(Date.now());
+  const lastPresenceSentAtRef = useRef(0);
   const lineIdRef = useRef(0);
   const isAddingProductRef = useRef(false);
   const scanInputRef = useRef({ value: "", lastInputAt: 0, rapidCharacters: 0 });
@@ -3260,6 +3276,31 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   }>());
   useEffect(() => {
     window.requestAnimationFrame(() => scannerRef.current?.focus());
+  }, []);
+  useEffect(() => {
+    const markActive = () => { lastPosActivityRef.current = Date.now(); };
+    const sendHeartbeat = async () => {
+      if (!navigator.onLine) return;
+      const active = lastPosActivityRef.current > lastPresenceSentAtRef.current;
+      lastPresenceSentAtRef.current = lastPosActivityRef.current;
+      try {
+        await api.post("/pos/heartbeat", { active });
+        setPresenceHeartbeatFailed(false);
+      } catch {
+        setPresenceHeartbeatFailed(true);
+      }
+    };
+    window.addEventListener("pointerdown", markActive);
+    window.addEventListener("keydown", markActive);
+    window.addEventListener("touchstart", markActive);
+    void sendHeartbeat();
+    const interval = window.setInterval(() => void sendHeartbeat(), 20_000);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("pointerdown", markActive);
+      window.removeEventListener("keydown", markActive);
+      window.removeEventListener("touchstart", markActive);
+    };
   }, []);
   useEffect(() => {
     if (!cart.length) return;
@@ -3384,7 +3425,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     onError: (error) => setCheckoutError(getErrorMessage(error)),
   });
   const openShiftMutation = useMutation({
-    mutationFn: async () => (await api.post<{ id: number; openingCash: string }>("/shifts/open", { openingCash })).data,
+    mutationFn: async () => (await api.post<{ id: number; openingCash: string }>("/shifts/open", { openingCash, counterNumber })).data,
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["active-shift"] }),
     onError: (error) => setCheckoutError(getErrorMessage(error)),
   });
@@ -4120,7 +4161,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
             : activeShift.isError ? <div className="checkout-footnote">Shift availability could not be checked.</div>
               : activeShift.isPending ? <div className="checkout-footnote">Checking cashier shift…</div>
                 : activeShift.data ? <div className="checkout-footnote"><ShieldCheck size={14} /> Stock is updated atomically</div>
-                  : <div className="shift-needed"><span>Start a cashier shift.</span><label>Opening cash<input value={openingCash} inputMode="decimal" onChange={(event) => setOpeningCash(event.target.value)} /></label><button className="shift-open-button" onClick={() => openShiftMutation.mutate()}>{openShiftMutation.isPending ? "Opening…" : "Open shift"}</button></div>}
+                  : <div className="shift-needed"><span>Start a cashier shift.</span><label>Opening cash<input value={openingCash} inputMode="decimal" onChange={(event) => setOpeningCash(event.target.value)} /></label><label>Counter / till<input maxLength={40} value={counterNumber} onChange={(event) => setCounterNumber(event.target.value)} placeholder="Optional" /></label><button className="shift-open-button" onClick={() => openShiftMutation.mutate()}>{openShiftMutation.isPending ? "Opening…" : "Open shift"}</button></div>}
         </aside>
       </div>
       {canViewTransactionHistory && transactionHistoryOpen && <section className="pos-history-panel" aria-labelledby="pos-history-title">
@@ -4174,6 +4215,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       <footer className="pos-statusbar">
         <span><i /> Ready for new sale...</span>
         <time>{new Date().toLocaleString("en-KE")}</time>
+        {presenceHeartbeatFailed && <b className="pos-network-status status-sync-failed">Presence update unavailable</b>}
         <b className={`pos-network-status status-${posConnectionStatus.toLowerCase().replace(" ", "-")}`}>
           ● {posConnectionStatus}{pendingOfflineCount > 0 ? ` · ${pendingOfflineCount} pending` : ""}
         </b>

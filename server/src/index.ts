@@ -28,6 +28,9 @@ import { productSchema, registerProduct, updateProduct, updateProductSchema } fr
 import {
   fetchOpenFoodFactsImage, lookupRegistrationBarcode, productBarcodeLookupSchema, productImageImportSchema,
 } from "./product-lookup.js";
+import {
+  cashierMonitorFiltersSchema, getCashierMonitoring, getCashierMonitorDetails, getMonitoredSaleReceipt,
+} from "./cashier-monitoring.js";
 import { getBranchReport, parseReportRange } from "./reports.js";
 import {
   addCashMovement, adjustmentSchema, approvePurchaseOrder, cashMovementSchema, closeShift, closeShiftSchema,
@@ -310,6 +313,25 @@ app.post("/api/auth/change-password", authenticate, (req, res, next) => void cha
 app.post("/api/pos/login", loginLimiter, (req, res, next) => void posLogin(req, res).catch(next));
 app.get("/api/pos/session", authenticate, authenticatePos, (req, res) => {
   res.json({ cashier: { ...req.posUser, username: req.posUser?.posUsername ?? req.posUser?.name } });
+});
+app.post("/api/pos/heartbeat", authenticate, authenticatePos, requireModule("pos"), async (req, res, next) => {
+  const active = z.object({ active: z.boolean() }).strict().safeParse(req.body);
+  if (!active.success || !req.posUser || !req.posSessionId) {
+    res.status(400).json({ error: "Provide a valid POS activity heartbeat." });
+    return;
+  }
+  try {
+    await pool.execute(
+      `UPDATE pos_sessions
+       SET last_used_at=CURRENT_TIMESTAMP,
+           last_activity_at=IF(?, CURRENT_TIMESTAMP, last_activity_at)
+       WHERE id=? AND user_id=? AND expires_at>NOW()`,
+      [active.data.active, req.posSessionId, req.posUser.id],
+    );
+    res.json({ receivedAt: new Date().toISOString() });
+  } catch (error) {
+    next(error);
+  }
 });
 app.post("/api/pos/logout", authenticate, authenticatePos, (req, res, next) => void posLogout(req, res).catch(next));
 app.post(
@@ -1563,6 +1585,70 @@ app.post("/api/sales/:id/cancel", authenticate, requireModule("sales"), requireM
     next(error);
   }
 });
+
+app.get(
+  "/api/cashier-monitoring",
+  authenticate, requireModule("cashier_monitoring"), requireRoles("admin", "manager"),
+  (req, res, next) => {
+    const filters = cashierMonitorFiltersSchema.safeParse(req.query);
+    if (!filters.success) { res.status(400).json({ error: "Provide valid cashier monitoring filters." }); return; }
+    handleOperation(() => getCashierMonitoring(req.user!, filters.data), res, next);
+  },
+);
+app.get(
+  "/api/cashier-monitoring/live",
+  authenticate, requireModule("cashier_monitoring"), requireRoles("admin", "manager"),
+  async (req, res, next) => {
+    const filters = cashierMonitorFiltersSchema.safeParse(req.query);
+    if (!filters.success) { res.status(400).json({ error: "Provide valid cashier monitoring filters." }); return; }
+    try {
+      const initial = await getCashierMonitoring(req.user!, filters.data);
+      res.status(200).set({
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "Content-Type": "text/event-stream",
+        "X-Accel-Buffering": "no",
+      });
+      res.flushHeaders();
+      res.write(`data: ${JSON.stringify(initial)}\n\n`);
+      let updating = false;
+      const interval = setInterval(() => {
+        if (updating || res.writableEnded) return;
+        updating = true;
+        void getCashierMonitoring(req.user!, filters.data).then((snapshot) => {
+          if (!res.writableEnded) res.write(`data: ${JSON.stringify(snapshot)}\n\n`);
+        }, () => {
+          if (!res.writableEnded) {
+            res.write(`event: monitor-error\ndata: {"message":"Live updates stopped; polling fallback is active."}\n\n`);
+            res.end();
+          }
+          clearInterval(interval);
+        }).finally(() => { updating = false; });
+      }, 5_000);
+      req.on("close", () => clearInterval(interval));
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+app.get(
+  "/api/cashier-monitoring/cashiers/:id",
+  authenticate, requireModule("cashier_monitoring"), requireRoles("admin", "manager"),
+  (req, res, next) => {
+    const id = positiveId(req.params.id);
+    if (!id) { res.status(400).json({ error: "Invalid cashier ID." }); return; }
+    handleOperation(() => getCashierMonitorDetails(req.user!, id), res, next);
+  },
+);
+app.get(
+  "/api/cashier-monitoring/sales/:id",
+  authenticate, requireModule("cashier_monitoring"), requireRoles("admin", "manager"),
+  (req, res, next) => {
+    const id = positiveId(req.params.id);
+    if (!id) { res.status(400).json({ error: "Invalid transaction ID." }); return; }
+    handleOperation(() => getMonitoredSaleReceipt(req.user!, id), res, next);
+  },
+);
 
 app.get("/api/dashboard/summary", authenticate, requireModule("dashboard"), async (req, res, next) => {
   try {

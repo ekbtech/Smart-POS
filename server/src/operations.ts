@@ -117,7 +117,10 @@ export const customerSchema = z.object({
   address: z.string().trim().max(500).optional(),
 }).strict();
 
-export const openShiftSchema = z.object({ openingCash: z.string().regex(/^\d{1,10}(\.\d{1,2})?$/) }).strict();
+export const openShiftSchema = z.object({
+  openingCash: z.string().regex(/^\d{1,10}(\.\d{1,2})?$/),
+  counterNumber: z.string().trim().max(40).optional(),
+}).strict();
 export const closeShiftSchema = z.object({ actualCash: z.string().regex(/^\d{1,10}(\.\d{1,2})?$/) }).strict();
 export const cashMovementSchema = z.object({
   type: z.enum(["deposit", "withdrawal"]),
@@ -1055,8 +1058,9 @@ export async function createCustomer(input: z.infer<typeof customerSchema>, user
 export async function getActiveShift(user: OperationUser) {
   const rows = await query<Array<{
     id: number; opening_cash: string; opened_at: Date; cashier_id: number; branch_name: string;
+    counter_number: string | null;
   } & RowDataPacket>>(
-    `SELECT cs.id, cs.opening_cash, cs.opened_at, cs.cashier_id, b.name AS branch_name
+    `SELECT cs.id, cs.opening_cash, cs.opened_at, cs.cashier_id, cs.counter_number, b.name AS branch_name
      FROM cashier_shifts cs JOIN branches b ON b.id = cs.branch_id
      WHERE cs.branch_id = ? AND cs.cashier_id = ? AND cs.status = 'open' LIMIT 1`,
     [user.branchId, user.id],
@@ -1065,6 +1069,7 @@ export async function getActiveShift(user: OperationUser) {
   return {
     id: rows[0].id, openingCash: rows[0].opening_cash,
     openedAt: rows[0].opened_at.toISOString(), branchName: rows[0].branch_name,
+    counterNumber: rows[0].counter_number,
   };
 }
 
@@ -1077,11 +1082,13 @@ export async function openShift(input: z.infer<typeof openShiftSchema>, user: Op
     );
     if (existing[0]) throw new HttpError(409, "You already have an open shift.");
     const [result] = await connection.execute(
-      "INSERT INTO cashier_shifts (branch_id, cashier_id, opening_cash) VALUES (?, ?, ?)",
-      [user.branchId, user.id, input.openingCash],
+      "INSERT INTO cashier_shifts (branch_id, cashier_id, counter_number, opening_cash) VALUES (?, ?, ?, ?)",
+      [user.branchId, user.id, input.counterNumber || null, input.openingCash],
     );
     const id = (result as { insertId: number }).insertId;
-    await writeAudit(connection, user.id, "shift.opened", "shift", id, { openingCash: input.openingCash });
+    await writeAudit(connection, user.id, "shift.opened", "shift", id, {
+      openingCash: input.openingCash, counterNumber: input.counterNumber || null,
+    });
       return { id, openingCash: input.openingCash };
     });
   } catch (error) {
