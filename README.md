@@ -25,6 +25,23 @@ To create the first administrator in a brand-new, empty database, temporarily se
 
 The Blueprint uses Render's free web-service plan, which can sleep when idle and is not appropriate for uninterrupted shop operations. Choose an always-on plan in Render for production use. Configure `CLIENT_ORIGIN` to your exact HTTPS custom-domain origin if you add one. Payment, WhatsApp, and backup integrations also need their server-side credentials/configuration; backup storage must be durable and separate from the live database, not the web service's ephemeral filesystem.
 
+## Railway deployment
+
+Create a Railway project with a MySQL service and a web service connected to this repository. Keep the web service at the repository root. In its settings, configure:
+
+- Build command: `npm run build`
+- Pre-deploy command: `npm run db:migrate:prod --workspace server`
+- Start command: `npm run start`
+- Health check path: `/api/health`
+
+In the web service variables, set `NODE_ENV=production`, `DATABASE_URL=${{ mysql.MYSQL_URL }}` (replace `mysql` with the exact MySQL service name), and a unique `JWT_SECRET` of at least 32 characters. Railway supplies `PORT`; the server automatically trusts the generated `RAILWAY_PUBLIC_DOMAIN`. Generate a public domain for the web service. If using a custom domain, set `CLIENT_ORIGIN` to its exact HTTPS origin.
+
+Railpack installs dependencies for the root npm workspace before running the build command. Do not add `npm ci` or `npm install` to the Railway build command: reinstalling can remove `client/node_modules/.vite` while Vite is building. The client’s `vite`, TypeScript, React, and Tailwind build plugins are declared in `client/package.json` and included by the root lockfile. The root `npm run build` compiles the API and then runs the client production build into `client/dist`, which the server serves in production.
+
+For a brand-new, empty database only, temporarily set `SEED_ADMIN_EMAIL`, a strong `SEED_ADMIN_PASSWORD`, and `SEED_SAMPLE_PRODUCTS=false` on the web service, then run `node server/dist/seed.js` once from the Railway service shell. Remove the temporary seed variables after creating the administrator. Do not seed an existing database; a new Railway MySQL service does not contain existing local business data.
+
+Run the app on a persistent Railway plan for shop operations, and configure database backups before using real transactions. If enabling Daraja M-Pesa, set its callback URL to the generated HTTPS domain ending in `/api/mpesa/callback`.
+
 ### Automatic receipt printing (Windows kiosk)
 
 After a sale completes, the POS opens the receipt and calls the browser print API. In a normal browser this displays a print dialog. For unattended printing, set the receipt printer as the Windows default printer, install its driver, and launch the POS in Edge or Chrome kiosk printing mode:

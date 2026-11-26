@@ -75,9 +75,15 @@ const configuredOrigins = (process.env.CLIENT_ORIGIN ?? defaultOrigins)
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
-const renderHostname = process.env.RENDER_EXTERNAL_HOSTNAME?.trim();
-if (renderHostname && !configuredOrigins.includes(`https://${renderHostname}`)) {
-  configuredOrigins.push(`https://${renderHostname}`);
+const platformHostnames = [
+  process.env.RENDER_EXTERNAL_HOSTNAME?.trim(),
+  process.env.RAILWAY_PUBLIC_DOMAIN?.trim(),
+].filter((hostname): hostname is string => Boolean(hostname));
+for (const hostname of platformHostnames) {
+  const origin = `https://${hostname}`;
+  if (!configuredOrigins.includes(origin)) configuredOrigins.push(origin);
+}
+if (platformHostnames.length) {
   app.set("trust proxy", 1);
 }
 const allowDevelopmentOrigins = process.env.NODE_ENV !== "production";
