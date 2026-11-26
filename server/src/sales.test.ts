@@ -73,6 +73,18 @@ describe("sale validation", () => {
     }).success).toBe(true);
   });
 
+  it("requires and records a card transaction reference", () => {
+    const sale = {
+      items: [{ productId: 3, quantity: "1" }],
+      payments: [{ method: "card", amount: "50.00" }],
+    };
+    expect(saleSchema.safeParse(sale).success).toBe(false);
+    expect(saleSchema.safeParse({
+      ...sale,
+      payments: [{ ...sale.payments[0], providerReference: "CARD-REF-001" }],
+    }).success).toBe(true);
+  });
+
   it("does not create unconfirmed online payments before a provider is configured", async () => {
     const input = saleSchema.parse({
       items: [{ productId: 3, quantity: "1" }],

@@ -48,7 +48,7 @@ The sidebar and frontend routes consume effective modules. Backend APIs independ
 
 The `sales` module is shown as **Transaction History** in the administrator module and permission editors. Migration `021_transaction_history_permissions.sql` adds granular transaction permissions. Migration `022_admin_granted_transaction_history.sql` disables inherited Transaction History and transaction-action permissions for every non-admin role. Administrators grant history access per user by allowing `sales` and either `transaction_own` or `transaction_all`; `transaction_details` is also required to open a transaction receipt. Other transaction actions can be granted individually. Explicit user permission overrides are preserved.
 
-Migration `023_live_cashier_monitoring.sql` adds the **Live Cashier Monitoring** module, shift counter/till number, and POS activity timestamps. Admins can monitor all branches; authorized managers are limited to their assigned branch. `GET /cashier-monitoring` accepts `scope=shift|today|custom`, optional `from`/`to`, and branch, cashier, and counter filters. `GET /cashier-monitoring/cashiers/:id` returns current open-shift details and transactions; `GET /cashier-monitoring/sales/:id` returns a monitored receipt and item breakdown. The dashboard polls every 10 seconds. Only completed sales and completed payment/refund records contribute to financial totals; pending and cancelled sales are excluded. Set `CASHIER_PRESENCE_TIMEOUT_SECONDS` (30–900, default 90) and `CASHIER_IDLE_TIMEOUT_SECONDS` (60–3600, default 300) to configure presence and idle status.
+Migration `023_live_cashier_monitoring.sql` adds the **Live Cashier Monitoring** module, shift counter/till number, and POS activity timestamps. Admins can monitor all branches; authorized managers are limited to their assigned branch. `GET /cashier-monitoring` accepts `scope=shift|today|custom`, optional `from`/`to`, and branch, cashier, and counter filters. `GET /cashier-monitoring/live` streams snapshot updates over Server-Sent Events, with 10-second client polling as a connectivity fallback. `GET /cashier-monitoring/cashiers/:id` returns current open-shift details and transactions; `GET /cashier-monitoring/sales/:id` returns a monitored receipt and item breakdown. Only completed sales and completed payment/refund records contribute to financial totals; pending and cancelled sales are excluded. Set `CASHIER_PRESENCE_TIMEOUT_SECONDS` (30–900, default 90) and `CASHIER_IDLE_TIMEOUT_SECONDS` (60–3600, default 300) to configure presence and idle status.
 
 ## Dashboard and catalogue
 
@@ -107,7 +107,7 @@ Quantities are decimal strings with up to three fractional digits. Monetary valu
 
 Apply migrations `012_sale_cash_tender.sql`, `013_bank_transfer_verification.sql`, and `019_mpesa_payment_requests.sql` before deploying this checkout/receipt update; they add persisted cash tender/change, bank-transfer authorization, and M-Pesa payment/callback records.
 
-Checkout locks the relevant inventory rows and writes the sale, item snapshots, payment, stock movements, and audit event inside one database transaction. A repeated idempotency key returns the original sale. Insufficient stock returns HTTP 409. Cash is enabled. Bank transfer requires an administrator to approve a submitted reference and exact amount after independently verifying it against the bank; checkout consumes that authorization in the same transaction as the sale. Split tender supports cash plus an administrator-verified bank transfer. Card remains disabled until a card provider is selected and integrated. An initiated or manually referenced external payment must never be treated as paid.
+Checkout locks the relevant inventory rows and writes the sale, item snapshots, payment, stock movements, and audit event inside one database transaction. A repeated idempotency key returns the original sale. Insufficient stock returns HTTP 409. Cash is enabled. Bank transfer requires an administrator to approve a submitted reference and exact amount after independently verifying it against the bank; checkout consumes that authorization in the same transaction as the sale. Split tender supports cash plus an administrator-verified bank transfer. Card checkout records the cashier-confirmed terminal reference; the POS does not independently validate it with a card provider, so only complete the sale after the terminal confirms approval. M-Pesa remains Daraja-verified and cannot be completed using a cashier-entered code alone. Never treat an initiated or unconfirmed external payment as paid.
 
 ### Daraja M-Pesa STK Push
 
@@ -119,7 +119,7 @@ Checkout locks the relevant inventory rows and writes the sale, item snapshots, 
 
 M-Pesa requests reserve available inventory while pending. Uncertain provider outcomes retain the reservation and must be reconciled before another payment is taken; do not retry an unknown request. Daraja STK Push accepts whole Kenyan shillings, so totals containing cents are rejected rather than rounded. The integration is inactive until the server environment contains `MPESA_ENVIRONMENT` (`sandbox` or `production`), `MPESA_CONSUMER_KEY`, `MPESA_CONSUMER_SECRET`, `MPESA_SHORTCODE`, `MPESA_PASSKEY`, and a reachable HTTPS `MPESA_CALLBACK_URL` ending in `/api/mpesa/callback`. Optionally set `MPESA_TRANSACTION_TYPE`. Never expose these values as `VITE_*` variables. Use the provider sandbox and verify the callback path from outside the local network before production.
 
-The receipt preview offers printing and browser **Save as PDF** through the print dialog. Set `RECEIPT_BUSINESS_NAME`, `RECEIPT_BUSINESS_PHONE`, `RECEIPT_BUSINESS_ADDRESS`, and optionally `RECEIPT_LOGO_URL` on the server to customize receipt branding.
+The POS automatically opens the completed receipt and invokes the system print dialog; the configured operating-system printer can be selected there. The receipt preview also offers browser **Save as PDF** through the print dialog. Set `RECEIPT_BUSINESS_NAME`, `RECEIPT_BUSINESS_PHONE`, `RECEIPT_BUSINESS_ADDRESS`, and optionally `RECEIPT_LOGO_URL` on the server to customize receipt branding.
 
 Checkout requires an open cashier shift for the signed-in user. Start one with `POST /shifts/open` before using the POS.
 
@@ -190,6 +190,10 @@ Batch metadata is optional for non-perishable goods. The inventory screen highli
 Transfers are branch-scoped and require an admin, manager, or inventory manager. Dispatch consumes source inventory and records batch, expiry, and cost snapshots; receipt recreates those lots at the destination. The receiving branch must report one quantity per item, not exceeding the dispatched amount. Any shortage is recorded on the transfer and in its audit log. Transfers cannot be edited or cancelled after dispatch.
 
 ## Suppliers and purchasing
+
+The Suppliers and Customers workspaces are presented together under the **Business Partners** navigation entry, with separate tabs. Their module permissions and API endpoints remain independent: `suppliers` controls supplier records and `customers` controls customer records. Migration `024_business_partners_workspace.sql` updates module labels/routes and existing default landing pages.
+
+Notifications, User Management, Price History, Backups, and Offline Sync are grouped under the **Settings** workspace with separate tabs and their existing module permissions. User Management remains administrator-only. Migration `025_settings_workspace.sql` updates module labels/routes and existing default landing pages.
 
 - `GET /suppliers`
 - `POST /suppliers` — admin, manager, or procurement officer.
@@ -275,7 +279,7 @@ Expense payment method is descriptive bookkeeping only; this endpoint does not i
 
 - `GET /sales?q=...&cashier=...&from=YYYY-MM-DD&to=YYYY-MM-DD&paymentMethod=...&status=...&branchId=...` — up to 500 recent transactions, with filters for receipt/ID/customer, cashier, date range, payment method, status, and (administrators only) branch. Cashiers are always restricted to their own cashier ID and branch unless an administrator grants `transaction_all`.
 - `GET /sales/:id` — transaction details, receipt data, items, totals, cashier, payment, and tender details; requires `transaction_details` and own/all transaction scope.
-- `GET /sales/:id/receipt` — receipt reprint lookup; requires `transaction_reprint` and own/all transaction scope.
+- `GET /sales/:id/receipt` — receipt reprint lookup; requires `sales` or `receipts`, `transaction_reprint`, and own/all transaction scope.
 - `GET /sales/export` — CSV export using the same filters; requires `transaction_export`.
 - `GET /pos/sales/:id/receipt` — POS receipt lookup restricted to the authenticated POS user and branch.
 - `GET /sales/held` — held sales for the authenticated cashier.

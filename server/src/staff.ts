@@ -134,7 +134,7 @@ async function ensureLandingAllowed(
   landing: string | null,
 ): Promise<void> {
   if (!landing) return;
-  if (landing === "/staff") {
+  if (landing === "/staff" || landing === "/settings/user-management") {
     const [admins] = await connection.execute<Array<RowDataPacket & { is_admin: number }>>(
       `SELECT EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id=ur.role_id
                       WHERE ur.user_id=? AND r.name='admin') AS is_admin`,

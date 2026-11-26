@@ -1,4 +1,5 @@
 import type { RowDataPacket } from "mysql2/promise";
+import { Decimal } from "decimal.js";
 import { z } from "zod";
 import type { AuthUser } from "./auth.js";
 import { query } from "./db.js";
@@ -126,8 +127,9 @@ function rangeConditions(filters: MonitorFilters, alias: string): { sql: string;
 
 export async function getCashierMonitoring(user: MonitorUser, filters: MonitorFilters) {
   assertCanMonitor(user);
-  const conditions = ["EXISTS (SELECT 1 FROM user_roles cr JOIN roles crole ON crole.id=cr.role_id WHERE cr.user_id=u.id AND crole.name='cashier')", "u.is_active=TRUE"];
+  const conditions = ["EXISTS (SELECT 1 FROM user_roles cr JOIN roles crole ON crole.id=cr.role_id WHERE cr.user_id=u.id AND crole.name='cashier')"];
   const parameters: Array<string | number> = [onlineTimeoutSeconds];
+  const scopedBranchId = user.roles.includes("admin") ? filters.branchId : user.branchId;
   if (!user.roles.includes("admin")) {
     conditions.push("u.branch_id=?");
     parameters.push(user.branchId);
@@ -147,12 +149,13 @@ export async function getCashierMonitoring(user: MonitorUser, filters: MonitorFi
     `SELECT u.id, u.name, u.pos_username AS username, e.employee_number, u.branch_id,
             b.name AS branch_name,
             COALESCE(GROUP_CONCAT(DISTINCT r.name ORDER BY r.name SEPARATOR ','), '') AS roles,
-            (COALESCE(ps.last_seen >= DATE_SUB(NOW(), INTERVAL ? SECOND), FALSE)
+            (u.is_active=TRUE
+             AND COALESCE(ps.last_seen >= DATE_SUB(NOW(), INTERVAL ? SECOND), FALSE)
              AND EXISTS (SELECT 1 FROM auth_sessions aus WHERE aus.user_id=u.id AND aus.expires_at>NOW())) AS online,
-            COALESCE(ps.login_at, (
+            COALESCE(ps.login_at, u.last_pos_login_at, (
               SELECT MAX(a.created_at) FROM audit_logs a
               WHERE a.user_id=u.id AND a.action='pos.login'
-            )) AS login_at, ps.last_activity_at,
+            )) AS login_at, COALESCE(ps.last_activity_at, u.last_pos_activity_at) AS last_activity_at,
             latest_shift.id AS shift_id, latest_shift.status AS shift_status,
             latest_shift.opened_at AS shift_opened_at, latest_shift.closed_at AS shift_closed_at,
             latest_shift.counter_number, latest_shift.opening_cash
@@ -168,12 +171,14 @@ export async function getCashierMonitoring(user: MonitorUser, filters: MonitorFi
      ) ps ON ps.user_id=u.id
      LEFT JOIN (
        SELECT cs.* FROM cashier_shifts cs
-       JOIN (SELECT cashier_id, MAX(id) AS shift_id FROM cashier_shifts GROUP BY cashier_id) ls
+       JOIN (SELECT cashier_id, branch_id, MAX(id) AS shift_id
+             FROM cashier_shifts GROUP BY cashier_id, branch_id) ls
          ON ls.shift_id=cs.id
-     ) latest_shift ON latest_shift.cashier_id=u.id
+     ) latest_shift ON latest_shift.cashier_id=u.id AND latest_shift.branch_id=u.branch_id
      WHERE ${conditions.join(" AND ")}
      GROUP BY u.id, u.name, u.pos_username, e.employee_number, u.branch_id, b.name,
-              ps.last_seen, ps.login_at, ps.last_activity_at, latest_shift.id, latest_shift.status,
+              ps.last_seen, ps.login_at, ps.last_activity_at, u.last_pos_login_at, u.last_pos_activity_at,
+              latest_shift.id, latest_shift.status,
               latest_shift.opened_at, latest_shift.closed_at, latest_shift.counter_number, latest_shift.opening_cash
      ORDER BY online DESC, latest_shift.status='open' DESC, u.name`,
     parameters,
@@ -197,6 +202,10 @@ export async function getCashierMonitoring(user: MonitorUser, filters: MonitorFi
   const salesRange = rangeConditions(filters, "s");
   const salesConditions = [`s.cashier_id IN (${ids})`, "s.status='completed'", salesRange.sql];
   const salesParameters: Array<string | number> = [...cashierIds, ...salesRange.parameters];
+  if (scopedBranchId) {
+    salesConditions.push("s.branch_id=?");
+    salesParameters.push(scopedBranchId);
+  }
   if (filters.scope === "shift") {
     if (!openShiftIds.length) {
       salesConditions.push("1=0");
@@ -206,6 +215,29 @@ export async function getCashierMonitoring(user: MonitorUser, filters: MonitorFi
     }
   }
   const salesWhere = salesConditions.join(" AND ");
+  const refundConditions = [
+    "s.status='completed'",
+    `s.cashier_id IN (${ids})`,
+    "r.status='completed'",
+  ];
+  const refundParameters: Array<string | number> = [...cashierIds];
+  if (scopedBranchId) {
+    refundConditions.push("s.branch_id=?");
+    refundParameters.push(scopedBranchId);
+  }
+  if (filters.scope === "shift") {
+    if (!openShiftIds.length) refundConditions.push("1=0");
+    else {
+      refundConditions.push(`s.shift_id IN (${openShiftIds.map(() => "?").join(",")})`);
+      refundParameters.push(...openShiftIds);
+    }
+  } else if (filters.scope === "today") {
+    refundConditions.push("r.created_at >= CURDATE() AND r.created_at < DATE_ADD(CURDATE(), INTERVAL 1 DAY)");
+  } else {
+    refundConditions.push("r.created_at >= ? AND r.created_at < DATE_ADD(?, INTERVAL 1 DAY)");
+    refundParameters.push(filters.from!, filters.to!);
+  }
+  const refundsWhere = refundConditions.join(" AND ");
   const [sales, payments, refundTotals, shiftTotals] = await Promise.all([
     query<Array<RowDataPacket & {
       cashier_id: number; transactions: number; gross: string; discounts: string;
@@ -228,8 +260,8 @@ export async function getCashierMonitoring(user: MonitorUser, filters: MonitorFi
       : query<Array<RowDataPacket & { cashier_id: number; refunds: string }>>(
         `SELECT s.cashier_id, COALESCE(SUM(r.total),0) AS refunds
          FROM sales s JOIN refunds r ON r.sale_id=s.id AND r.status='completed'
-         WHERE ${salesWhere} GROUP BY s.cashier_id`,
-        salesParameters,
+         WHERE ${refundsWhere} GROUP BY s.cashier_id`,
+        refundParameters,
       ),
     query<Array<RowDataPacket & {
       shift_id: number; cash_sales: string; cash_expenses: string;
@@ -264,7 +296,7 @@ export async function getCashierMonitoring(user: MonitorUser, filters: MonitorFi
     ),
   ]);
   const salesByCashier = new Map(sales.map((row) => [row.cashier_id, row]));
-  const refundsByCashier = new Map(refundTotals.map((row) => [row.cashier_id, Number(row.refunds)]));
+  const refundsByCashier = new Map(refundTotals.map((row) => [row.cashier_id, row.refunds]));
   const paymentsByCashier = new Map<number, Record<string, string>>();
   for (const payment of payments) {
     const grouped = paymentsByCashier.get(payment.cashier_id) ?? {};
@@ -275,8 +307,8 @@ export async function getCashierMonitoring(user: MonitorUser, filters: MonitorFi
   const now = Date.now();
   const rows: CashierRow[] = cashiers.map((cashier) => {
     const totals = salesByCashier.get(cashier.id);
-    const gross = Number(totals?.gross ?? 0);
-    const refunds = refundsByCashier.get(cashier.id) ?? 0;
+    const gross = new Decimal(totals?.gross ?? 0);
+    const refunds = new Decimal(refundsByCashier.get(cashier.id) ?? "0");
     const shiftFinance = cashier.shift_id ? shiftFinancials.get(cashier.shift_id) : undefined;
     const shiftAge = cashier.shift_status === "open" && cashier.shift_opened_at
       ? Math.max(0, Math.floor((now - new Date(cashier.shift_opened_at).getTime()) / 1000))
@@ -289,11 +321,11 @@ export async function getCashierMonitoring(user: MonitorUser, filters: MonitorFi
       shiftStatus: cashier.shift_status,
     });
     const paymentAmounts = paymentsByCashier.get(cashier.id) ?? {};
-    const openingCash = Number(cashier.opening_cash ?? 0);
     const expectedCash = cashier.shift_status === "open"
-      ? openingCash + Number(shiftFinance?.cash_sales ?? 0) + Number(shiftFinance?.deposits ?? 0)
-        - Number(shiftFinance?.withdrawals ?? 0) - Number(shiftFinance?.cash_expenses ?? 0)
-      : 0;
+      ? new Decimal(cashier.opening_cash ?? 0)
+        .plus(shiftFinance?.cash_sales ?? 0).plus(shiftFinance?.deposits ?? 0)
+        .minus(shiftFinance?.withdrawals ?? 0).minus(shiftFinance?.cash_expenses ?? 0)
+      : new Decimal(0);
     return {
       id: cashier.id, name: cashier.name, username: cashier.username,
       employeeNumber: cashier.employee_number, branchId: cashier.branch_id, branch: cashier.branch_name,
@@ -303,9 +335,9 @@ export async function getCashierMonitoring(user: MonitorUser, filters: MonitorFi
       shiftId: cashier.shift_id, shiftStatus: cashier.shift_status,
       shiftOpenedAt: iso(cashier.shift_opened_at), shiftClosedAt: iso(cashier.shift_closed_at),
       counter: cashier.counter_number, openingCash: cashier.opening_cash ?? "0.00", status,
-      transactions: Number(totals?.transactions ?? 0), grossSales: Number(gross).toFixed(2),
+      transactions: Number(totals?.transactions ?? 0), grossSales: gross.toFixed(2),
       discounts: totals?.discounts ?? "0.00", refunds: refunds.toFixed(2),
-      netSales: (gross - refunds).toFixed(2),
+      netSales: gross.minus(refunds).toFixed(2),
       payments: {
         cash: paymentAmounts.cash ?? "0.00", mpesa: paymentAmounts.mpesa ?? "0.00",
         card: paymentAmounts.card ?? "0.00", bank_transfer: paymentAmounts.bank_transfer ?? "0.00",
@@ -317,22 +349,22 @@ export async function getCashierMonitoring(user: MonitorUser, filters: MonitorFi
   });
   const paymentTotals = rows.reduce<{
     transactions: number;
-    gross: number;
-    refunds: number;
-    net: number;
-    payments: Record<string, number>;
+    gross: Decimal;
+    refunds: Decimal;
+    net: Decimal;
+    payments: Record<string, Decimal>;
   }>((totals, cashier) => {
     totals.transactions += cashier.transactions;
-    totals.gross += Number(cashier.grossSales);
-    totals.refunds += Number(cashier.refunds);
-    totals.net += Number(cashier.netSales);
+    totals.gross = totals.gross.plus(cashier.grossSales);
+    totals.refunds = totals.refunds.plus(cashier.refunds);
+    totals.net = totals.net.plus(cashier.netSales);
     for (const method of Object.keys(totals.payments)) {
-      totals.payments[method] += Number(cashier.payments[method] ?? 0);
+      totals.payments[method] = totals.payments[method]!.plus(cashier.payments[method] ?? 0);
     }
     return totals;
   }, {
-    transactions: 0, gross: 0, refunds: 0, net: 0,
-    payments: { cash: 0, mpesa: 0, card: 0, bank_transfer: 0, credit: 0 },
+    transactions: 0, gross: new Decimal(0), refunds: new Decimal(0), net: new Decimal(0),
+    payments: { cash: new Decimal(0), mpesa: new Decimal(0), card: new Decimal(0), bank_transfer: new Decimal(0), credit: new Decimal(0) },
   });
   return {
     cashiers: rows,

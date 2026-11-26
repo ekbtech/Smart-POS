@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity, ArrowDownLeft, ArrowLeftRight, ArrowUpDown, ArrowUpRight, Boxes, CalendarDays, Camera, CameraOff, ChevronDown, CircleDollarSign,
-  Command, LayoutDashboard, LogOut, Menu, PackagePlus, Plus, Search, ShieldCheck,
+  Command, LayoutDashboard, LogOut, Menu, PackagePlus, Plus, Search, Settings as SettingsIcon, ShieldCheck,
   ShoppingBasket, ShoppingCart, TrendingUp, X, Users, Truck, Banknote, ReceiptText, RotateCcw, Download,
   Pause, Printer, QrCode, RefreshCw, ScanBarcode, Smartphone, Trash2, Upload,
 } from "lucide-react";
@@ -96,23 +96,52 @@ function hasTransactionHistoryAccess(user: User): boolean {
     || user.modules?.includes("transaction_all") === true;
 }
 
+const settingsSections = [
+  { module: "notifications", path: "/settings/notifications", label: "Notifications" },
+  { module: "permissions", path: "/settings/user-management", label: "User Management" },
+  { module: "price_history", path: "/settings/price-history", label: "Price History" },
+  { module: "backups", path: "/settings/backups", label: "Backups" },
+  { module: "sync_monitor", path: "/settings/offline-sync", label: "Offline Sync" },
+] as const;
+
+function canAccessSettingsSection(user: User, module: string): boolean {
+  return user.modules?.includes(module) === true
+    && (module !== "permissions" || user.roles.includes("admin"));
+}
+
+function canAccessSettings(user: User): boolean {
+  return settingsSections.some(({ module }) => canAccessSettingsSection(user, module));
+}
+
 function getLandingPath(user: User): string {
   const routeMap: Record<string, string> = {
     dashboard: "/", pos: "/pos", sales: "/sales", products: "/products",
-    inventory: "/inventory", purchases: "/purchases", suppliers: "/suppliers",
-    customers: "/customers", expenses: "/expenses", shifts: "/shifts",
+    inventory: "/inventory", purchases: "/purchases",
+    suppliers: "/business-partners/suppliers", customers: "/business-partners/customers",
+    expenses: "/expenses", shifts: "/shifts",
     reports: "/reports",
+    notifications: "/settings/notifications", permissions: "/settings/user-management",
+    price_history: "/settings/price-history", backups: "/settings/backups",
+    sync_monitor: "/settings/offline-sync",
   };
   if (user.roles.includes("cashier")) {
     return user.modules?.includes("pos") ? "/pos" : "/access-denied";
   }
   if (user.roles.includes("admin") && user.modules?.includes("dashboard")) return "/";
-  const landing = user.defaultLanding;
+  const legacyLandingPaths: Record<string, string> = {
+    "/customers": "/business-partners/customers", "/suppliers": "/business-partners/suppliers",
+    "/staff": "/settings/user-management", "/notifications": "/settings/notifications",
+    "/price-history": "/settings/price-history", "/backups": "/settings/backups",
+    "/sync-monitor": "/settings/offline-sync",
+  };
+  const landing = user.defaultLanding ? legacyLandingPaths[user.defaultLanding] ?? user.defaultLanding : undefined;
   if (landing && Object.entries(routeMap).some(([moduleId, route]) =>
     route === landing && user.modules?.includes(moduleId)
+      && (moduleId !== "permissions" || user.roles.includes("admin"))
       && (moduleId !== "sales" || hasTransactionHistoryAccess(user)))) return landing;
   const fallback = user.modules?.find((moduleId) =>
-    routeMap[moduleId] && (moduleId !== "sales" || hasTransactionHistoryAccess(user)));
+    routeMap[moduleId] && (moduleId !== "permissions" || user.roles.includes("admin"))
+      && (moduleId !== "sales" || hasTransactionHistoryAccess(user)));
   return fallback ? routeMap[fallback]! : "/access-denied";
 }
 
@@ -122,18 +151,14 @@ const workspaceNavigationItems = [
   { module: "products", route: "/products", label: "Products", icon: <Boxes size={18} aria-hidden="true" /> },
   { module: "inventory", route: "/inventory", label: "Inventory", icon: <ArrowLeftRight size={18} aria-hidden="true" /> },
   { module: "purchases", route: "/purchases", label: "Purchasing", icon: <Truck size={18} aria-hidden="true" /> },
-  { module: "suppliers", route: "/suppliers", label: "Suppliers", icon: <Users size={18} aria-hidden="true" /> },
-  { module: "customers", route: "/customers", label: "Customers", icon: <Users size={18} aria-hidden="true" /> },
+  { module: "business_partners", route: "/business-partners", label: "Business Partners", icon: <Users size={18} aria-hidden="true" /> },
   { module: "shifts", route: "/shifts", label: "Cashier shifts", icon: <Banknote size={18} aria-hidden="true" /> },
   { module: "cashier_monitoring", route: "/cashier-monitor", label: "Live cashiers", icon: <Activity size={18} aria-hidden="true" /> },
   { module: "expenses", route: "/expenses", label: "Expenses", icon: <ReceiptText size={18} aria-hidden="true" /> },
   { module: "reports", route: "/reports", label: "Reports", icon: <TrendingUp size={18} aria-hidden="true" /> },
   { module: "sales", route: "/sales", label: "Transaction History", icon: <ReceiptText size={18} aria-hidden="true" /> },
   { module: "branches", route: "/branches", label: "Branches", icon: <Users size={18} aria-hidden="true" /> },
-  { module: "sync_monitor", route: "/sync-monitor", label: "Offline sync", icon: <RefreshCw size={18} aria-hidden="true" /> },
-  { module: "backups", route: "/backups", label: "Backups", icon: <ShieldCheck size={18} aria-hidden="true" /> },
-  { module: "price_history", route: "/price-history", label: "Price history", icon: <ReceiptText size={18} aria-hidden="true" /> },
-  { module: "notifications", route: "/notifications", label: "Notifications", icon: <Smartphone size={18} aria-hidden="true" /> },
+  { module: "settings", route: "/settings", label: "Settings", icon: <SettingsIcon size={18} aria-hidden="true" /> },
   { module: "receipts", route: "/receipts", label: "E-receipts", icon: <ReceiptText size={18} aria-hidden="true" /> },
   { module: "comparisons", route: "/comparisons", label: "Comparisons", icon: <TrendingUp size={18} aria-hidden="true" /> },
 ] as const;
@@ -143,7 +168,11 @@ function WorkspaceNavigation({
 }: { user: User; className: string; linkClassName: string; id?: string; showShortcuts?: boolean; onNavigate?: () => void }) {
   return (
     <nav className={className} id={id} aria-label="Workspace navigation">
-      {workspaceNavigationItems.map((item) => user.modules?.includes(item.module)
+      {workspaceNavigationItems.map((item) => (item.module === "business_partners"
+        ? user.modules?.some((module) => module === "customers" || module === "suppliers")
+        : item.module === "settings"
+          ? canAccessSettings(user)
+          : user.modules?.includes(item.module))
         && (item.module !== "cashier_monitoring" || user.roles.some((role) => ["admin", "manager"].includes(role)))
         && (item.module !== "sales" || hasTransactionHistoryAccess(user)) ? (
         <NavLink
@@ -158,17 +187,6 @@ function WorkspaceNavigation({
           {item.icon}<span>{item.label}</span>{showShortcuts && item.module === "pos" && <span className="nav-shortcut">F2</span>}
         </NavLink>
       ) : null)}
-      {user.roles.includes("admin") && user.modules?.includes("permissions") && (
-        <NavLink
-          to="/staff"
-          onClick={onNavigate}
-          aria-label="User management"
-          title="User management"
-          className={({ isActive }) => `${linkClassName}${isActive ? " active" : ""}`}
-        >
-          <ShieldCheck size={18} aria-hidden="true" /><span>User management</span>
-        </NavLink>
-      )}
     </nav>
   );
 }
@@ -213,10 +231,14 @@ function AuthenticatedApp() {
         <Route path="/pos" element={<PermissionRoute module="pos" user={me.data}><PosEntryPage user={me.data} /></PermissionRoute>} />
         <Route path="/products" element={<PermissionRoute module="products" user={me.data}><ProductsPage user={me.data} /></PermissionRoute>} />
         <Route path="/inventory" element={<PermissionRoute module="inventory" user={me.data}><InventoryPage user={me.data} /></PermissionRoute>} />
-        <Route path="/suppliers" element={<PermissionRoute module="suppliers" user={me.data}><SuppliersPage user={me.data} /></PermissionRoute>} />
         <Route path="/purchases" element={<PermissionRoute module="purchases" user={me.data}><PurchasesPage user={me.data} /></PermissionRoute>} />
-        <Route path="/customers" element={<PermissionRoute module="customers" user={me.data}><CustomersPage user={me.data} /></PermissionRoute>} />
-        <Route path="/staff" element={<AdminPermissionRoute user={me.data}><StaffPage user={me.data} /></AdminPermissionRoute>} />
+        <Route path="/business-partners" element={<BusinessPartnersLayout user={me.data} />}>
+          <Route index element={<BusinessPartnersLanding user={me.data} />} />
+          <Route path="customers" element={<PermissionRoute module="customers" user={me.data}><CustomersPage user={me.data} /></PermissionRoute>} />
+          <Route path="suppliers" element={<PermissionRoute module="suppliers" user={me.data}><SuppliersPage user={me.data} /></PermissionRoute>} />
+        </Route>
+        <Route path="/customers" element={<Navigate to="/business-partners/customers" replace />} />
+        <Route path="/suppliers" element={<Navigate to="/business-partners/suppliers" replace />} />
         <Route path="/shifts" element={<PermissionRoute module="shifts" user={me.data}><ShiftsPage user={me.data} /></PermissionRoute>} />
         <Route path="/cashier-monitor" element={me.data.modules?.includes("cashier_monitoring") && me.data.roles.some((role) => ["admin", "manager"].includes(role))
           ? <Suspense fallback={<div className="boot-screen">Loading cashier monitoring…</div>}><CashierMonitoringPage user={me.data} /></Suspense>
@@ -228,11 +250,20 @@ function AuthenticatedApp() {
           ? <SalesPage user={me.data} />
           : <AccessDeniedPage />} />
         <Route path="/branches" element={<PermissionRoute module="branches" user={me.data}><BranchesPage /></PermissionRoute>} />
-        <Route path="/sync-monitor" element={<PermissionRoute module="sync_monitor" user={me.data}><OfflineSyncPage /></PermissionRoute>} />
-        <Route path="/backups" element={<PermissionRoute module="backups" user={me.data}><BackupsPage /></PermissionRoute>} />
-        <Route path="/price-history" element={<PermissionRoute module="price_history" user={me.data}><PriceHistoryPage /></PermissionRoute>} />
-        <Route path="/notifications" element={<PermissionRoute module="notifications" user={me.data}><NotificationsPage user={me.data} /></PermissionRoute>} />
-        <Route path="/receipts" element={<PermissionRoute module="receipts" user={me.data}><ElectronicReceiptsPage /></PermissionRoute>} />
+        <Route path="/settings" element={<SettingsLayout user={me.data} />}>
+          <Route index element={<SettingsLanding user={me.data} />} />
+          <Route path="notifications" element={<PermissionRoute module="notifications" user={me.data}><NotificationsPage user={me.data} /></PermissionRoute>} />
+          <Route path="user-management" element={<AdminPermissionRoute user={me.data}><StaffPage user={me.data} /></AdminPermissionRoute>} />
+          <Route path="price-history" element={<PermissionRoute module="price_history" user={me.data}><PriceHistoryPage /></PermissionRoute>} />
+          <Route path="backups" element={<PermissionRoute module="backups" user={me.data}><BackupsPage /></PermissionRoute>} />
+          <Route path="offline-sync" element={<PermissionRoute module="sync_monitor" user={me.data}><OfflineSyncPage /></PermissionRoute>} />
+        </Route>
+        <Route path="/staff" element={<Navigate to="/settings/user-management" replace />} />
+        <Route path="/notifications" element={<Navigate to="/settings/notifications" replace />} />
+        <Route path="/price-history" element={<Navigate to="/settings/price-history" replace />} />
+        <Route path="/backups" element={<Navigate to="/settings/backups" replace />} />
+        <Route path="/sync-monitor" element={<Navigate to="/settings/offline-sync" replace />} />
+        <Route path="/receipts" element={<PermissionRoute module="receipts" user={me.data}><ElectronicReceiptsPage user={me.data} /></PermissionRoute>} />
         <Route path="/comparisons" element={<PermissionRoute module="comparisons" user={me.data}><ComparisonsPage /></PermissionRoute>} />
         <Route path="/access-denied" element={<AccessDeniedPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
@@ -244,6 +275,46 @@ function AuthenticatedApp() {
 function AdminPermissionRoute({ user, children }: { user: User; children: ReactNode }) {
   if (user.roles.includes("admin") && user.modules?.includes("permissions")) return <>{children}</>;
   return <AccessDeniedPage />;
+}
+
+function SettingsLayout({ user }: { user: User }) {
+  if (!canAccessSettings(user)) return <AccessDeniedPage />;
+  return (
+    <div className="settings-workspace">
+      <nav className="staff-tabs settings-tabs" aria-label="Settings sections">
+        {settingsSections.filter(({ module }) => canAccessSettingsSection(user, module)).map((section) => (
+          <NavLink key={section.module} to={section.path} end>{section.label}</NavLink>
+        ))}
+      </nav>
+      <Outlet />
+    </div>
+  );
+}
+
+function SettingsLanding({ user }: { user: User }) {
+  const firstSection = settingsSections.find(({ module }) => canAccessSettingsSection(user, module));
+  return <Navigate to={firstSection?.path ?? "/access-denied"} replace />;
+}
+
+function BusinessPartnersLayout({ user }: { user: User }) {
+  const canViewCustomers = user.modules?.includes("customers") === true;
+  const canViewSuppliers = user.modules?.includes("suppliers") === true;
+  if (!canViewCustomers && !canViewSuppliers) return <AccessDeniedPage />;
+  return (
+    <div className="business-partners-workspace">
+      <nav className="staff-tabs business-partners-tabs" aria-label="Business partner sections">
+        {canViewCustomers && <NavLink to="/business-partners/customers" end>Customers</NavLink>}
+        {canViewSuppliers && <NavLink to="/business-partners/suppliers" end>Suppliers</NavLink>}
+      </nav>
+      <Outlet />
+    </div>
+  );
+}
+
+function BusinessPartnersLanding({ user }: { user: User }) {
+  return <Navigate to={user.modules?.includes("customers")
+    ? "/business-partners/customers"
+    : "/business-partners/suppliers"} replace />;
 }
 
 function ChangePasswordPage() {
@@ -367,9 +438,14 @@ function AppShell({ user }: { user: User }) {
   const isProducts = location.pathname.startsWith("/products");
   const toggleSidebar = () => setMobileSidebarOpen((open) => !open);
   const pageLabels: Record<string, string> = {
-    "/inventory": "Inventory", "/suppliers": "Suppliers", "/purchases": "Purchasing",
-    "/customers": "Customers", "/shifts": "Cashier shifts", "/expenses": "Expenses", "/sales": "Sales & returns",
-    "/staff": "User management", "/reports": "Reports", "/cashier-monitor": "Live cashiers",
+    "/inventory": "Inventory", "/business-partners": "Business Partners",
+    "/business-partners/customers": "Business Partners", "/business-partners/suppliers": "Business Partners",
+    "/suppliers": "Business Partners", "/purchases": "Purchasing",
+    "/customers": "Business Partners", "/shifts": "Cashier shifts", "/expenses": "Expenses", "/sales": "Sales & returns",
+    "/settings": "Settings", "/settings/notifications": "Settings", "/settings/user-management": "Settings",
+    "/settings/price-history": "Settings", "/settings/backups": "Settings", "/settings/offline-sync": "Settings",
+    "/staff": "Settings", "/notifications": "Settings", "/price-history": "Settings", "/backups": "Settings",
+    "/sync-monitor": "Settings", "/reports": "Reports", "/cashier-monitor": "Live cashiers",
   };
   const pageLabel = pageLabels[location.pathname];
   return (
@@ -2157,6 +2233,7 @@ function ReceiptDialog({
   onClose,
   onNewSale,
   allowPrinting = true,
+  autoPrint = false,
 }: {
   receipt: SaleReceipt;
   width: "58mm" | "80mm";
@@ -2164,8 +2241,14 @@ function ReceiptDialog({
   onClose: () => void;
   onNewSale?: () => void;
   allowPrinting?: boolean;
+  autoPrint?: boolean;
 }) {
   const printReceipt = () => window.print();
+  useEffect(() => {
+    if (!autoPrint) return;
+    const timer = window.setTimeout(() => window.print(), 300);
+    return () => window.clearTimeout(timer);
+  }, [autoPrint, receipt.sale.id]);
   const amountPaid = receipt.payments
     .filter((payment) => payment.status === "completed")
     .reduce((total, payment) => total + Number(payment.amount), 0);
@@ -2841,24 +2924,44 @@ function NotificationsPage({ user }: { user: User }) {
   </EnterprisePageShell>;
 }
 
-function ElectronicReceiptsPage() {
+function ElectronicReceiptsPage({ user }: { user: User }) {
   const [search, setSearch] = useState("");
+  const [selectedReceiptId, setSelectedReceiptId] = useState<number | null>(null);
+  const [receiptWidth, setReceiptWidth] = useState<"58mm" | "80mm">("80mm");
+  const canReprint = user.modules?.includes("transaction_reprint") === true;
   const receipts = useQuery({
     queryKey: ["electronic-receipts", search],
     queryFn: async () => (await api.get("/electronic-receipts", { params: { q: search || undefined } })).data as Array<{ id: number; saleId: number; receiptNumber: string; total: string; cashier: string; branch: string; createdAt: string }>,
+  });
+  const receipt = useQuery({
+    queryKey: ["electronic-receipt-reprint", selectedReceiptId],
+    enabled: selectedReceiptId !== null,
+    queryFn: async () => (await api.get<SaleReceipt>(`/sales/${selectedReceiptId}/receipt`)).data,
   });
   const rows = receipts.data ?? [];
   return <EnterprisePageShell title="Electronic Receipts" eyebrow="DIGITAL DOCUMENTS">
     <section className="panel enterprise-table-panel">
       <div className="enterprise-toolbar"><div className="table-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search receipt or cashier" /></div></div>
+      {selectedReceiptId !== null && receipt.isPending && <div role="status" className="success-banner">Loading receipt for reprint…</div>}
+      {selectedReceiptId !== null && receipt.isError && <ErrorBanner message={getErrorMessage(receipt.error)} onRetry={() => void receipt.refetch()} />}
       {receipts.isPending ? <LoadingRows /> : receipts.isError ? <ErrorBanner message={getErrorMessage(receipts.error)} onRetry={() => void receipts.refetch()} /> :
         rows.length ? <EnterpriseTable
           columns={["Receipt", "Branch", "Cashier", "Total", "Date", "Action"]}
           rows={rows.map((row) => [row.receiptNumber, row.branch, row.cashier, money(row.total),
             new Date(row.createdAt).toLocaleString("en-KE"),
-            <Link key="view" className="enterprise-link" to={`/sales`}>View sale</Link>])}
+            <div key="actions" className="row-actions">
+              {user.modules?.includes("sales") && <Link className="enterprise-link" to="/sales">View sale</Link>}
+              {canReprint && <button className="small-action" onClick={() => setSelectedReceiptId(row.saleId)}>Reprint</button>}
+            </div>])}
         /> : <EmptyState title="No electronic receipts" detail="Completed sales generate digital receipts automatically." />}
     </section>
+    {receipt.data && <ReceiptDialog
+      receipt={receipt.data}
+      width={receiptWidth}
+      onWidthChange={setReceiptWidth}
+      onClose={() => setSelectedReceiptId(null)}
+      allowPrinting={canReprint}
+    />}
   </EnterprisePageShell>;
 }
 
@@ -3234,14 +3337,20 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const [counterNumber, setCounterNumber] = useState("");
   const [amountPaid, setAmountPaid] = useState("");
   const [receiptWidth, setReceiptWidth] = useState<"58mm" | "80mm">("80mm");
+  const [completedSaleId, setCompletedSaleId] = useState<number | null>(null);
   const [transactionHistoryOpen, setTransactionHistoryOpen] = useState(false);
   const [transactionSearch, setTransactionSearch] = useState("");
   const [transactionDate, setTransactionDate] = useState("");
   const [historyReceiptId, setHistoryReceiptId] = useState<number | null>(null);
-  const [paymentMethod, setPaymentMethod] = useState<"cash" | "bank_transfer" | "mpesa" | "split">("cash");
+  const [paymentMethod, setPaymentMethod] = useState<"cash" | "mpesa" | "card" | "bank_transfer" | "split">("cash");
+  const [paymentMethodOpen, setPaymentMethodOpen] = useState(false);
+  const [cardReference, setCardReference] = useState("");
   const [bankReference, setBankReference] = useState("");
   const [cashAllocation, setCashAllocation] = useState("");
   const [cashConfirmOpen, setCashConfirmOpen] = useState(false);
+  const [cardConfirmOpen, setCardConfirmOpen] = useState(false);
+  const [bankConfirmOpen, setBankConfirmOpen] = useState(false);
+  const [splitConfirmOpen, setSplitConfirmOpen] = useState(false);
   const [mpesaDialogOpen, setMpesaDialogOpen] = useState(false);
   const [mpesaPhone, setMpesaPhone] = useState("");
   const [mpesaDescription, setMpesaDescription] = useState("Retail purchase");
@@ -3382,6 +3491,11 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     queryFn: async () => (await api.get<SaleReceipt>(`/sales/${historyReceiptId}`)).data,
     enabled: historyReceiptId !== null && canViewTransactionDetails,
   });
+  const completedReceipt = useQuery({
+    queryKey: ["pos-completed-receipt", completedSaleId],
+    queryFn: async () => (await api.get<SaleReceipt>(`/pos/sales/${completedSaleId}/receipt`)).data,
+    enabled: completedSaleId !== null,
+  });
   const mpesaConfigQuery = useQuery({
     queryKey: ["mpesa-config"],
     queryFn: async () => (await api.get<{ mpesa: { configured: boolean; reason: string | null; requiresWholeShillings: boolean } }>("/mpesa/config")).data.mpesa,
@@ -3514,6 +3628,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
           method: paymentMethod,
           amount: fromCents(payableCents),
           ...(paymentMethod === "bank_transfer" ? { providerReference: bankReference.trim() } : {}),
+          ...(paymentMethod === "card" ? { providerReference: cardReference.trim() } : {}),
         }];
       const body = {
         items: aggregateCartItems(cart),
@@ -3556,10 +3671,12 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       }
       const sale = result.sale;
       setToast(`Sale ${sale.receiptNumber} completed · Ready for a new sale.`);
+      setCompletedSaleId(sale.id);
       setCart([]);
       setSaleDiscount("0.00");
       setAmountPaid("");
       setPaymentMethod("cash");
+      setCardReference("");
       setBankReference("");
       setCashAllocation("");
       setBankVerification(null);
@@ -3568,7 +3685,11 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       mpesaSaleHandledRef.current = null;
       setCheckoutError("");
       idempotencyRef.current = null;
+      setPaymentMethodOpen(false);
       setCashConfirmOpen(false);
+      setCardConfirmOpen(false);
+      setBankConfirmOpen(false);
+      setSplitConfirmOpen(false);
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       void queryClient.invalidateQueries({ queryKey: ["products"] });
       void queryClient.invalidateQueries({ queryKey: ["sales"] });
@@ -3619,6 +3740,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   });
   const completeMpesaSale = (saleId: number) => {
     setToast(`Sale #${saleId} completed · Ready for a new sale.`);
+    setCompletedSaleId(saleId);
     setCart([]);
     setSaleDiscount("0.00");
     setAmountPaid("");
@@ -3857,19 +3979,24 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     && bankVerification.amount === fromCents(bankAllocationCents);
   const canCompletePayment = paymentMethod === "cash"
     ? validCashTender && amountPaidCents >= payableCents
-    : paymentMethod === "split"
-      ? validCashAllocation && validCashTender
-        && cashAllocationCents > 0 && bankAllocationCents > 0
-        && amountPaidCents >= cashAllocationCents
-        && Boolean(bankReference.trim())
-        && bankTransferApprovedForAmount
-      : paymentMethod === "bank_transfer"
-        ? Boolean(bankReference.trim()) && bankTransferApprovedForAmount
-        : false;
+    : paymentMethod === "card"
+      ? Boolean(cardReference.trim())
+      : paymentMethod === "split"
+        ? validCashAllocation && validCashTender
+          && cashAllocationCents > 0 && bankAllocationCents > 0
+          && amountPaidCents >= cashAllocationCents
+          && Boolean(bankReference.trim())
+          && bankTransferApprovedForAmount
+        : paymentMethod === "bank_transfer"
+          ? Boolean(bankReference.trim()) && bankTransferApprovedForAmount
+          : false;
   const completeCheckout = () => {
-    if (!canCompletePayment || !cart.length || !activeShift.data || mpesaPaymentUnresolved) return;
-    if (paymentMethod === "cash") setCashConfirmOpen(true);
-    else checkout.mutate();
+    if (!canSell || !cart.length || !activeShift.data || checkout.isPending || mpesaPaymentUnresolved) return;
+    setPaymentMethodOpen(true);
+  };
+  const submitCheckout = () => {
+    if (!canCompletePayment || !cart.length || !activeShift.data || checkout.isPending || mpesaPaymentUnresolved) return;
+    checkout.mutate();
   };
   const bankTransferControls = <>
     <label className="pos-payment-input"><span>Bank transaction reference</span><input value={bankReference} onChange={(event) => { setBankReference(event.target.value); setBankVerification(null); }} maxLength={100} autoComplete="off" placeholder="Enter bank transfer reference" disabled={mpesaPaymentUnresolved} /></label>
@@ -3906,17 +4033,25 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       if (event.key === "F7") { event.preventDefault(); if (!mpesaPaymentUnresolved) void heldSalesQuery.refetch(); }
       if (event.key === "F9") {
         event.preventDefault();
-        if (canSell && cart.length && canCompletePayment && activeShift.data && !checkout.isPending) completeCheckout();
+        if (canSell && cart.length && activeShift.data && !checkout.isPending && !paymentMethodOpen
+          && !cashConfirmOpen && !cardConfirmOpen && !bankConfirmOpen && !splitConfirmOpen) completeCheckout();
       }
       if (event.key === "Escape") {
         event.preventDefault();
-        if (cashConfirmOpen) setCashConfirmOpen(false);
+        if (paymentMethodOpen) setPaymentMethodOpen(false);
+        else if (cashConfirmOpen) setCashConfirmOpen(false);
+        else if (cardConfirmOpen) setCardConfirmOpen(false);
+        else if (bankConfirmOpen) setBankConfirmOpen(false);
+        else if (splitConfirmOpen) setSplitConfirmOpen(false);
+        else if (mpesaDialogOpen && !mpesaPaymentUnresolved) setMpesaDialogOpen(false);
         else if (!mpesaPaymentUnresolved && !mpesaPaymentId) { setCart([]); setSaleDiscount("0.00"); setAmountPaid(""); }
       }
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [cart.length, canSell, canCompletePayment, activeShift.data, checkout.isPending, holdSaleMutation, heldSalesQuery, cashConfirmOpen, mpesaPaymentUnresolved, mpesaPaymentId]);
+  }, [cart.length, canSell, activeShift.data, checkout.isPending, holdSaleMutation, heldSalesQuery,
+    paymentMethodOpen, cashConfirmOpen, cardConfirmOpen, bankConfirmOpen, splitConfirmOpen,
+    mpesaDialogOpen, mpesaPaymentUnresolved, mpesaPaymentId]);
 
   const actualCashNumber = Math.round((Number(actualCashCounted) || 0) * 100);
   const expectedCashNumber = Math.round(Number(shiftSummary.data?.expectedCash ?? 0) * 100);
@@ -4110,53 +4245,29 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
         </div>
         <aside className="pos-payment-panel">
           <div className="pos-payment-heading"><span>Transaction summary</span><b>{cart.reduce((sum, item) => sum + item.quantity, 0)} items</b></div>
+          <div className="pos-summary-items" aria-label="Products in transaction">
+            {!cart.length
+              ? <div className="pos-summary-empty">Scan or search for products to begin.</div>
+              : cart.map(({ lineId, product, quantity }) => <div className="pos-summary-item" key={lineId}>
+                <div className="pos-summary-item-copy">
+                  <strong>{product.name}</strong>
+                  <span>{quantity} × {money(product.sellingPrice)}</span>
+                </div>
+                <b>{money(lineTotalCents({ lineId, product, quantity }) / 100)}</b>
+              </div>)}
+          </div>
           <div className="pos-payment-grid">
             <div><span>Subtotal</span><strong>{money(subtotalCents / 100)}</strong></div>
             <div className="pos-discount-summary"><label htmlFor="sale-discount">Discount</label><input id="sale-discount" type="number" min="0" max={subtotalCents / 100} step="0.01" value={saleDiscount} onChange={(event) => setSaleDiscount(event.target.value)} onBlur={() => setSaleDiscount(fromCents(discountAmountCents))} inputMode="decimal" disabled={mpesaPaymentUnresolved} /></div>
             <div><span>VAT</span><strong>{money(taxCents / 100)}</strong></div>
             <div className="payable"><span>Total payable</span><strong>{money(payableCents / 100)}</strong></div>
           </div>
-          {paymentMethod === "cash" ? <>
-            <label className="pos-payment-input"><span>Amount received</span><input value={amountPaid} onChange={(event) => setAmountPaid(event.target.value)} inputMode="decimal" placeholder="0.00" disabled={mpesaPaymentUnresolved} /></label>
-            <div className="pos-payment-change"><span>{changeCents > 0 ? "Change due" : "Balance"}</span><strong>{money((changeCents > 0 ? changeCents : balanceCents) / 100)}</strong></div>
-          </> : paymentMethod === "split" ? <>
-            <label className="pos-payment-input"><span>Cash portion</span><input value={cashAllocation} onChange={(event) => { setCashAllocation(event.target.value); setBankVerification(null); }} inputMode="decimal" placeholder="0.00" disabled={mpesaPaymentUnresolved} /></label>
-            <label className="pos-payment-input"><span>Cash received</span><input value={amountPaid} onChange={(event) => setAmountPaid(event.target.value)} inputMode="decimal" placeholder="0.00" disabled={mpesaPaymentUnresolved} /></label>
-            <div className="pos-payment-change"><span>{cashShareChangeCents > 0 ? "Cash change due" : "Cash balance"}</span><strong>{money((cashShareChangeCents > 0 ? cashShareChangeCents : cashShareBalanceCents) / 100)}</strong></div>
-            {bankTransferControls}
-          </> : paymentMethod === "bank_transfer" ? bankTransferControls : (
-            <div className="mpesa-payment-hint">Enter the customer’s phone number in the M-Pesa payment window to request payment.</div>
-          )}
-          <div className="pos-payment-methods">
-            <button className={paymentMethod === "cash" ? "active" : ""} type="button" disabled={mpesaPaymentUnresolved} onClick={() => setPaymentMethod("cash")}>Cash</button>
-            <button className={paymentMethod === "mpesa" ? "active" : ""} type="button" disabled={mpesaPaymentUnresolved} onClick={() => { setPaymentMethod("mpesa"); setMpesaDialogOpen(true); setMpesaError(""); }}>M-Pesa</button>
-            <button type="button" disabled title="Configure and verify a payment provider before enabling">Card</button>
-            <button className={paymentMethod === "bank_transfer" ? "active" : ""} type="button" disabled={mpesaPaymentUnresolved} onClick={() => setPaymentMethod("bank_transfer")}>Bank transfer</button>
-            <button className={paymentMethod === "split" ? "active" : ""} type="button" disabled={mpesaPaymentUnresolved} title="Split between cash and an administrator-verified bank transfer." onClick={() => setPaymentMethod("split")}>Split</button>
-          </div>
-          <div className="payment-setup-note">
-            {paymentMethod === "bank_transfer" || paymentMethod === "split"
-              ? "Bank transfers require administrator verification before the sale is completed."
-              : paymentMethod === "mpesa"
-                ? mpesaConfigQuery.data?.configured
-                  ? "M-Pesa is verified by Daraja before the sale is completed."
-                  : "Daraja credentials and a public HTTPS callback are required to accept M-Pesa."
-                : "Card payments remain unavailable until a verified card provider is configured."}
-          </div>
-          <div className="pos-payment-actions">
-            <button className="complete" disabled={!canSell || !cart.length || !canCompletePayment || checkout.isPending || !activeShift.data || mpesaPaymentUnresolved} onClick={completeCheckout}>{checkout.isPending ? "Processing…" : "Complete Sale"} <span>F9</span></button>
-            <button className="hold" disabled={!cart.length || holdSaleMutation.isPending || mpesaPaymentUnresolved} onClick={() => holdSaleMutation.mutate()}>Hold Sale <span>F6</span></button>
-            <button className="cancel" disabled={mpesaPaymentUnresolved} onClick={() => {
-              setCart([]);
-              setSaleDiscount("0.00");
-              setAmountPaid("");
-              setCheckoutError("");
-              if (mpesaStatus === "failed" || mpesaStatus === "cancelled") {
-                setMpesaPaymentId(null);
-                mpesaIdempotencyRef.current = null;
-              }
-            }}>Cancel Sale <span>Esc</span></button>
-          </div>
+          <button
+            type="button"
+            className="pos-proceed-button"
+            disabled={!canSell || !cart.length || checkout.isPending || !activeShift.data || mpesaPaymentUnresolved}
+            onClick={completeCheckout}
+          >Proceed to Payment <span>→</span></button>
           {!canSell ? <div className="checkout-footnote">Your role cannot complete sales.</div>
             : activeShift.isError ? <div className="checkout-footnote">Shift availability could not be checked.</div>
               : activeShift.isPending ? <div className="checkout-footnote">Checking cashier shift…</div>
@@ -4220,19 +4331,112 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
           ● {posConnectionStatus}{pendingOfflineCount > 0 ? ` · ${pendingOfflineCount} pending` : ""}
         </b>
       </footer>
+      {completedReceipt.isError && <ErrorBanner
+        message={`Sale was saved, but its receipt could not be loaded: ${getErrorMessage(completedReceipt.error)}`}
+        onRetry={() => void completedReceipt.refetch()}
+      />}
+      {paymentMethodOpen && <div className="pos-confirm-screen pos-payment-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="payment-method-title">
+        <section className="pos-payment-dialog">
+          <button type="button" className="pos-payment-dialog-close" aria-label="Close payment methods" onClick={() => setPaymentMethodOpen(false)}><X size={18} /></button>
+          <span className="pos-confirm-eyebrow">CHECKOUT</span>
+          <h2 id="payment-method-title">Select payment method</h2>
+          <p>Choose how the customer will pay <strong>{money(payableCents / 100)}</strong>.</p>
+          <div className="pos-method-options">
+            <button type="button" onClick={() => { setPaymentMethod("cash"); setAmountPaid(""); setPaymentMethodOpen(false); setCashConfirmOpen(true); }}>
+              <strong>Cash</strong><span>Enter cash received and calculate change</span>
+            </button>
+            <button type="button" onClick={() => { setPaymentMethod("mpesa"); setPaymentMethodOpen(false); setMpesaDialogOpen(true); setMpesaError(""); }}>
+              <strong>M-Pesa</strong><span>Request payment and verify with Daraja</span>
+            </button>
+            <button type="button" onClick={() => { setPaymentMethod("card"); setCardReference(""); setPaymentMethodOpen(false); setCardConfirmOpen(true); }}>
+              <strong>Card</strong><span>Record the terminal transaction reference</span>
+            </button>
+            <button type="button" onClick={() => { setPaymentMethod("bank_transfer"); setBankVerification(null); setPaymentMethodOpen(false); setBankConfirmOpen(true); }}>
+              <strong>Bank transfer</strong><span>Submit the bank reference for approval</span>
+            </button>
+            <button type="button" className="pos-method-split" onClick={() => { setPaymentMethod("split"); setPaymentMethodOpen(false); setSplitConfirmOpen(true); }}>
+              <strong>Split payment</strong><span>Cash plus administrator-verified bank transfer</span>
+            </button>
+          </div>
+          <div className="pos-payment-dialog-actions">
+            <button type="button" className="cancel" onClick={() => setPaymentMethodOpen(false)}>Back to POS</button>
+          </div>
+        </section>
+      </div>}
       {cashConfirmOpen && <div className="pos-confirm-screen cash-confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="cash-confirm-title">
-        <section className="pos-confirm-card">
+        <section className="pos-confirm-card pos-payment-dialog">
           <span className="pos-confirm-eyebrow">CASH PAYMENT</span>
-          <h2 id="cash-confirm-title">Confirm cash received</h2>
+          <h2 id="cash-confirm-title">Enter cash received</h2>
           <div className="cash-confirm-summary">
             <div><span>Total payable</span><strong>{money(payableCents / 100)}</strong></div>
-            <div><span>Amount received</span><strong>{money(amountPaidCents / 100)}</strong></div>
-            <div><span>Change due</span><strong>{money(changeCents / 100)}</strong></div>
+            <label className="pos-modal-input">Amount received
+              <input autoFocus value={amountPaid} onChange={(event) => setAmountPaid(event.target.value)} inputMode="decimal" placeholder="0.00" />
+            </label>
+            <div className={balanceCents > 0 ? "pos-modal-balance" : ""}>
+              <span>{changeCents > 0 ? "Change due" : "Remaining balance"}</span>
+              <strong>{money((changeCents > 0 ? changeCents : balanceCents) / 100)}</strong>
+            </div>
           </div>
-          <p>Confirm that you received the cash amount shown. The sale will be saved and the register will be ready for the next sale.</p>
+          {balanceCents > 0 && <p className="pos-modal-hint">The amount received is less than the total payable. Receive the remaining balance to complete this sale.</p>}
           <div className="pos-confirm-actions">
-            <button className="confirm" disabled={checkout.isPending} onClick={() => checkout.mutate()}>{checkout.isPending ? "Recording…" : "Confirm payment"}</button>
-            <button className="cancel" disabled={checkout.isPending} onClick={() => setCashConfirmOpen(false)}>Back</button>
+            <button className="confirm" disabled={!canCompletePayment || checkout.isPending} onClick={submitCheckout}>{checkout.isPending ? "Recording…" : "Complete payment"}</button>
+            <button className="cancel" disabled={checkout.isPending} onClick={() => setCashConfirmOpen(false)}>Back to POS</button>
+          </div>
+        </section>
+      </div>}
+      {cardConfirmOpen && <div className="pos-confirm-screen pos-payment-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="card-payment-title">
+        <section className="pos-payment-dialog">
+          <span className="pos-confirm-eyebrow">CARD PAYMENT</span>
+          <h2 id="card-payment-title">Confirm card payment</h2>
+          <div className="cash-confirm-summary">
+            <div><span>Total payable</span><strong>{money(payableCents / 100)}</strong></div>
+          </div>
+          <label className="pos-modal-input">Card transaction / reference number
+            <input autoFocus value={cardReference} onChange={(event) => setCardReference(event.target.value)} maxLength={100} autoComplete="off" placeholder="Enter the approved terminal reference" />
+          </label>
+          <p className="pos-modal-hint">Confirm the payment on the card terminal before completing this sale.</p>
+          <div className="pos-confirm-actions">
+            <button className="confirm" disabled={!canCompletePayment || checkout.isPending} onClick={submitCheckout}>{checkout.isPending ? "Recording…" : "Complete payment"}</button>
+            <button className="cancel" disabled={checkout.isPending} onClick={() => setCardConfirmOpen(false)}>Back to POS</button>
+          </div>
+        </section>
+      </div>}
+      {bankConfirmOpen && <div className="pos-confirm-screen pos-payment-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="bank-payment-title">
+        <section className="pos-payment-dialog">
+          <span className="pos-confirm-eyebrow">BANK TRANSFER</span>
+          <h2 id="bank-payment-title">Confirm bank transfer</h2>
+          <div className="cash-confirm-summary">
+            <div><span>Total payable</span><strong>{money(payableCents / 100)}</strong></div>
+          </div>
+          {bankTransferControls}
+          <p className="pos-modal-hint">The transfer must be approved before this sale can be completed.</p>
+          <div className="pos-confirm-actions">
+            <button className="confirm" disabled={!canCompletePayment || checkout.isPending} onClick={submitCheckout}>{checkout.isPending ? "Recording…" : "Complete payment"}</button>
+            <button className="cancel" disabled={checkout.isPending} onClick={() => setBankConfirmOpen(false)}>Back to POS</button>
+          </div>
+        </section>
+      </div>}
+      {splitConfirmOpen && <div className="pos-confirm-screen pos-payment-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="split-payment-title">
+        <section className="pos-payment-dialog">
+          <span className="pos-confirm-eyebrow">SPLIT PAYMENT</span>
+          <h2 id="split-payment-title">Cash + bank transfer</h2>
+          <div className="cash-confirm-summary">
+            <div><span>Total payable</span><strong>{money(payableCents / 100)}</strong></div>
+          </div>
+          <label className="pos-modal-input">Cash portion
+            <input value={cashAllocation} onChange={(event) => { setCashAllocation(event.target.value); setBankVerification(null); }} inputMode="decimal" placeholder="0.00" />
+          </label>
+          <label className="pos-modal-input">Cash received
+            <input value={amountPaid} onChange={(event) => setAmountPaid(event.target.value)} inputMode="decimal" placeholder="0.00" />
+          </label>
+          <div className="cash-confirm-summary">
+            <div><span>{cashShareChangeCents > 0 ? "Cash change due" : "Cash balance"}</span><strong>{money((cashShareChangeCents > 0 ? cashShareChangeCents : cashShareBalanceCents) / 100)}</strong></div>
+            <div><span>Bank transfer portion</span><strong>{money(bankAllocationCents / 100)}</strong></div>
+          </div>
+          {bankTransferControls}
+          <div className="pos-confirm-actions">
+            <button className="confirm" disabled={!canCompletePayment || checkout.isPending} onClick={submitCheckout}>{checkout.isPending ? "Recording…" : "Complete payment"}</button>
+            <button className="cancel" disabled={checkout.isPending} onClick={() => setSplitConfirmOpen(false)}>Back to POS</button>
           </div>
         </section>
       </div>}
@@ -4337,6 +4541,14 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
           </div>
         </section>
       </div>}
+      {completedReceipt.data && <ReceiptDialog
+        receipt={completedReceipt.data}
+        width={receiptWidth}
+        onWidthChange={setReceiptWidth}
+        onClose={() => setCompletedSaleId(null)}
+        allowPrinting
+        autoPrint
+      />}
       {historyReceipt.data && <ReceiptDialog
         receipt={historyReceipt.data}
         width={receiptWidth}

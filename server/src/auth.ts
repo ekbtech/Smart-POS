@@ -22,7 +22,7 @@ const ttl = process.env.JWT_TTL ?? "8h";
 const landingModuleIds = new Set([
   "dashboard", "pos", "sales", "products", "inventory", "purchases", "suppliers",
   "customers", "expenses", "shifts", "reports",
-  "branches", "sync_monitor", "backups", "price_history", "notifications", "receipts", "comparisons",
+  "branches", "sync_monitor", "backups", "price_history", "notifications", "permissions", "receipts", "comparisons",
   "cashier_monitoring",
 ]);
 
@@ -379,6 +379,10 @@ async function createPosSessionForAuthenticatedUser(req: Request, res: Response)
     posSessionId, user.id, expiresAt,
   ]);
   await execute(
+    "UPDATE users SET last_pos_login_at=CURRENT_TIMESTAMP, last_pos_activity_at=CURRENT_TIMESTAMP WHERE id=?",
+    [user.id],
+  );
+  await execute(
     "INSERT INTO audit_logs (user_id, action, entity_type, entity_id) VALUES (?, 'pos.login', 'user', ?)",
     [user.id, String(user.id)],
   );
@@ -483,6 +487,10 @@ export async function posLogin(req: Request, res: Response): Promise<void> {
   const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000);
   await execute("INSERT INTO pos_sessions (id, user_id, expires_at) VALUES (?, ?, ?)", [sessionId, user.id, expiresAt]);
   await execute(
+    "UPDATE users SET last_pos_login_at=CURRENT_TIMESTAMP, last_pos_activity_at=CURRENT_TIMESTAMP WHERE id=?",
+    [user.id],
+  );
+  await execute(
     "INSERT INTO audit_logs (user_id, action, entity_type, entity_id) VALUES (?, 'pos.login', 'user', ?)",
     [user.id, String(user.id)],
   );
@@ -538,6 +546,7 @@ export async function authenticatePos(req: Request, res: Response, next: NextFun
 export async function posLogout(req: Request, res: Response): Promise<void> {
   if (req.posUser && req.posSessionId) {
     await revokeScannerPairingsForPosSession(req.posSessionId);
+    await execute("UPDATE users SET last_pos_activity_at=CURRENT_TIMESTAMP WHERE id=?", [req.posUser.id]);
     await execute(
       "INSERT INTO audit_logs (user_id, action, entity_type, entity_id) VALUES (?, 'pos.logout', 'user', ?)",
       [req.posUser.id, String(req.posUser.id)],

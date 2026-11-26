@@ -43,11 +43,14 @@ export const saleSchema = z.object({
     }
   }
   for (const payment of sale.payments) {
+    if (payment.method === "card" && !payment.providerReference) {
+      context.addIssue({ code: "custom", path: ["payments"], message: "A card transaction reference is required." });
+    }
     if (payment.method === "bank_transfer" && !payment.providerReference) {
       context.addIssue({ code: "custom", path: ["payments"], message: "A bank transfer reference is required." });
     }
-    if (payment.method !== "bank_transfer" && payment.method !== "mpesa" && payment.providerReference) {
-      context.addIssue({ code: "custom", path: ["payments"], message: "Payment references are only accepted for verified provider payments." });
+    if (payment.method !== "bank_transfer" && payment.method !== "mpesa" && payment.method !== "card" && payment.providerReference) {
+      context.addIssue({ code: "custom", path: ["payments"], message: "Payment references are only accepted for card or verified provider payments." });
     }
   }
 });

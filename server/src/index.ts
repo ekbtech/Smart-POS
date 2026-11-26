@@ -328,6 +328,9 @@ app.post("/api/pos/heartbeat", authenticate, authenticatePos, requireModule("pos
        WHERE id=? AND user_id=? AND expires_at>NOW()`,
       [active.data.active, req.posSessionId, req.posUser.id],
     );
+    if (active.data.active) {
+      await pool.execute("UPDATE users SET last_pos_activity_at=CURRENT_TIMESTAMP WHERE id=?", [req.posUser.id]);
+    }
     res.json({ receivedAt: new Date().toISOString() });
   } catch (error) {
     next(error);
@@ -1528,7 +1531,7 @@ app.get("/api/pos/sales/:id/receipt", authenticate, authenticatePos, requireModu
   }
 });
 
-app.get("/api/sales/:id/receipt", authenticate, requireModule("sales"), requireTransactionViewScope(), requireModule("transaction_reprint"), async (req, res, next) => {
+app.get("/api/sales/:id/receipt", authenticate, requireAnyModule("sales", "receipts"), requireTransactionViewScope(), requireModule("transaction_reprint"), async (req, res, next) => {
   const id = positiveId(req.params.id ?? "");
   if (!id) { res.status(400).json({ error: "Invalid sale ID." }); return; }
   try {

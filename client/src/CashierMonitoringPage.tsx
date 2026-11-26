@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, CircleDollarSign, Clock3, Radio, Users } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, getErrorMessage, type User } from "./api";
 
@@ -99,14 +99,15 @@ function useMonitoring(params: Record<string, string | undefined>, live = false)
   const queryClient = useQueryClient();
   const [streamConnected, setStreamConnected] = useState(false);
   const parameterKey = JSON.stringify(params);
+  const stableParams = useMemo(() => params, [parameterKey]);
   const query = useQuery({
-    queryKey: ["cashier-monitoring", params],
+    queryKey: ["cashier-monitoring", stableParams],
     queryFn: async () => (await api.get<MonitorResponse>("/cashier-monitoring", { params })).data,
     refetchInterval: live && streamConnected ? false : 10_000,
     refetchIntervalInBackground: true,
   });
-  useStateEffect(live, parameterKey, params, queryClient, setStreamConnected);
-  return query;
+  useStateEffect(live, parameterKey, stableParams, queryClient, setStreamConnected);
+  return { ...query, streamConnected };
 }
 
 function useStateEffect(
@@ -137,11 +138,11 @@ function useStateEffect(
       stream.close();
       setStreamConnected(false);
     };
-  }, [live, parameterKey, params, queryClient, setStreamConnected]);
+  }, [live, parameterKey, queryClient, setStreamConnected]);
 }
 
 export function LiveCashierSummary() {
-  const monitoring = useMonitoring({ scope: "today" });
+  const monitoring = useMonitoring({ scope: "today" }, true);
   const data = monitoring.data;
   if (monitoring.isError) {
     return <section className="panel cashier-monitor-summary">
@@ -224,7 +225,7 @@ export default function CashierMonitoringPage({ user }: { user: User }) {
         <h1>Live Cashier Monitoring</h1>
         <p>Presence, shifts, and confirmed sales from the POS ledger.</p></div>
       <div className="cashier-monitor-update" aria-live="polite">
-        <span className={stale ? "monitor-connection-stale" : "monitor-connection-live"}><Radio size={15} />{stale ? "Update delayed" : "Live · polling"}</span>
+        <span className={stale ? "monitor-connection-stale" : "monitor-connection-live"}><Radio size={15} />{stale ? "Update delayed" : monitoring.streamConnected ? "Live · SSE" : "Polling fallback"}</span>
         <small>Last update {updatedAt?.toLocaleTimeString("en-KE", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) ?? "—"}</small>
       </div>
     </div>
