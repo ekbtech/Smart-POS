@@ -25,6 +25,16 @@ To create the first administrator in a brand-new, empty database, temporarily se
 
 The Blueprint uses Render's free web-service plan, which can sleep when idle and is not appropriate for uninterrupted shop operations. Choose an always-on plan in Render for production use. Configure `CLIENT_ORIGIN` to your exact HTTPS custom-domain origin if you add one. Payment, WhatsApp, and backup integrations also need their server-side credentials/configuration; backup storage must be durable and separate from the live database, not the web service's ephemeral filesystem.
 
+### Automatic receipt printing (Windows kiosk)
+
+After a sale completes, the POS opens the receipt and calls the browser print API. In a normal browser this displays a print dialog. For unattended printing, set the receipt printer as the Windows default printer, install its driver, and launch the POS in Edge or Chrome kiosk printing mode:
+
+```powershell
+.\scripts\start-pos-kiosk.ps1 -Url "https://your-pos-host/pos" -Browser Edge
+```
+
+Use `-Browser Chrome` to select Chrome. The launcher enables kiosk printing and uses a separate persistent browser profile; print jobs go directly to the Windows default printer without a confirmation dialog. Test the printer and paper size before cashier use. This requires the kiosk browser to run on the cashier computer; a remotely hosted web server cannot access that computer's printer directly.
+
 ### Android phone barcode scanner
 
 From POS, select **Phone scanner**; from an Add Product form, select **Connect Phone Scanner**. Each flow creates a one-time QR code. On Android Chrome, scan it to open `/mobile-scanner`, grant camera access, and use the rear camera (EAN-13, EAN-8, UPC-A, UPC-E, and Code 128). Manual barcode entry, connection status, reconnect, and disconnect controls are available on the phone. The laptop also shows whether the phone is connected and can revoke its pairing.
@@ -57,7 +67,7 @@ The seed command refuses to run without an explicitly configured admin password.
 
 The API is served under `/api`. Authentication, staff, dashboard, reports, catalogue, checkout, inventory, supplier, purchase order, customer, shift, expense, and refund endpoints are documented in [docs/API.md](./docs/API.md).
 
-All monetary values are stored as MySQL `DECIMAL`. The sale API computes prices and totals from the database, locks inventory rows, rejects insufficient stock by default, and commits sale, payments, stock movements, and audit data in one transaction. Cash and administrator-verified bank transfers are supported, including cash/bank split tender. Daraja M-Pesa STK Push is implemented server-side but remains unavailable until credentials and a publicly reachable HTTPS callback URL are configured. Card is disabled until a provider is selected and integrated. Run `npm run db:migrate` to apply `server/migrations/019_mpesa_payment_requests.sql` before enabling M-Pesa. Never treat an initiated or manually referenced external payment as paid.
+All monetary values are stored as MySQL `DECIMAL`. The sale API computes prices and totals from the database, locks inventory rows, rejects insufficient stock by default, and commits sale, payments, stock movements, and audit data in one transaction. Cash and administrator-verified bank transfers are supported, including cash/bank split tender. Daraja M-Pesa STK Push is implemented server-side but remains unavailable until credentials and a publicly reachable HTTPS callback URL are configured. Card terminal references are recorded after cashier confirmation; the POS does not independently verify them with a card provider. Run `npm run db:migrate` to apply `server/migrations/019_mpesa_payment_requests.sql` before enabling M-Pesa. Do not treat initiated or unconfirmed external payments as paid.
 
 ## Project layout
 
