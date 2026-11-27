@@ -42,15 +42,25 @@ For a brand-new, empty database only, temporarily set `SEED_ADMIN_EMAIL`, a stro
 
 Run the app on a persistent Railway plan for shop operations, and configure database backups before using real transactions. If enabling Daraja M-Pesa, set its callback URL to the generated HTTPS domain ending in `/api/mpesa/callback`.
 
-### Automatic receipt printing (Windows kiosk)
+### Automatic 80mm receipt printing (QZ Tray)
 
-After a sale completes, the POS opens the receipt and calls the browser print API. In a normal browser this displays a print dialog. For unattended printing, set the receipt printer as the Windows default printer, install its driver, and launch the POS in Edge or Chrome kiosk printing mode:
+After the server confirms a sale, the POS clears the cart and prepares the next sale immediately. It then loads that saved sale's receipt and sends a compact 80mm HTML receipt to the selected local printer through QZ Tray; it does not open the browser print dialog or preview. A printer failure leaves the sale completed and shows **Retry receipt**, which only reloads and prints the existing sale—it never submits another payment.
 
-```powershell
-.\scripts\start-pos-kiosk.ps1 -Url "https://your-pos-host/pos" -Browser Edge
-```
+Set up every cashier computer:
 
-Use `-Browser Chrome` to select Chrome. The launcher enables kiosk printing and uses a separate persistent browser profile; print jobs go directly to the Windows default printer without a confirmation dialog. Test the printer and paper size before cashier use. This requires the kiosk browser to run on the cashier computer; a remotely hosted web server cannot access that computer's printer directly.
+1. Install QZ Tray and the thermal printer driver, connect the printer, and configure its driver for an 80mm continuous/receipt roll with suitable margins.
+2. Open the POS in a secure browser context (HTTPS in production; localhost for development), sign in to POS, select **Receipt printer**, refresh the printer list, choose the 80mm thermal printer, and save it. The selection is local to that browser on that computer.
+3. Configure a QZ Tray signing certificate and private key on the API server. Production silent printing requires a certificate trusted by QZ Tray, issued through QZ Industries' certificate process. The public certificate and private key must be the matching pair. Do not use demo signing keys in production.
+4. Set server environment variables `QZ_CERTIFICATE_BASE64` and `QZ_PRIVATE_KEY_BASE64` to the Base64-encoded contents of the QZ `digital-certificate.txt` and private-key PEM files. For PowerShell, encode each file with:
+
+   ```powershell
+   [Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\path\to\digital-certificate.txt"))
+   [Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\path\to\private-key.pem"))
+   ```
+
+   Store both values only in the hosting provider's server environment (for example, Railway service variables). Never put the private key in frontend variables, source control, or chat. Restart/redeploy the API after changing the variables.
+
+The POS server exposes the certificate and an RSA-SHA512 signing operation only to an authenticated POS session. QZ Tray must be installed and running on each cashier computer; the hosted API cannot directly access a remote cashier's USB printer. Without the trusted signing configuration, printing fails visibly and remains retryable rather than falling back to browser printing. A successful QZ response means the job was handed to the local print service; verify the physical printer, paper size, and test receipt before cashier use. Transaction History retains its separate manual browser-print option.
 
 ### Android phone barcode scanner
 

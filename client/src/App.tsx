@@ -17,6 +17,10 @@ import { z } from "zod";
 import {
   api, getErrorMessage, type BranchReport, type DashboardSummary, type Product, type User,
 } from "./api";
+import {
+  discoverReceiptPrinters, print80mmReceipt, suggestReceiptPrinter,
+  type SaleReceipt,
+} from "./thermal-printer";
 import { createUuid } from "./uuid";
 import { listOfflineSales, removeOfflineSale, saveOfflineSale, updateOfflineSale, type OfflineSaleRecord } from "./offline";
 
@@ -35,18 +39,11 @@ const greeting = new Intl.DateTimeFormat("en-KE", { weekday: "long", month: "lon
 const timeGreeting = new Date().getHours() < 12 ? "Good morning" : new Date().getHours() < 17 ? "Good afternoon" : "Good evening";
 const dateInputValue = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 type PosCartLine = { lineId: number; product: Product; quantity: number };
-type SaleReceipt = {
-  sale: {
-    id: number; receiptNumber: string; subtotal: string; discount: string; tax: string;
-    total: string; status: string; createdAt: string; cashier: string; customer: string | null;
-    branch: string; cashReceived: string | null; changeDue: string;
-  };
-  business: { name: string; phone: string; address: string; logoUrl: string | null };
-  items: Array<{
-    id: number; productId?: number; sku: string; name: string; quantity: string;
-    refunded?: string; unitPrice: string; taxRate?: string; lineTotal: string;
-  }>;
-  payments: Array<{ method: string; amount: string; status: string; reference: string | null }>;
+type ReceiptPrintJob = {
+  saleId: number;
+  receiptNumber: string;
+  status: "printing" | "failed" | "printed";
+  error?: string;
 };
 type BankTransferVerification = {
   id: number; amount: string; status: "pending" | "verified" | "rejected" | "used";
@@ -2233,7 +2230,6 @@ function ReceiptDialog({
   onClose,
   onNewSale,
   allowPrinting = true,
-  autoPrint = false,
 }: {
   receipt: SaleReceipt;
   width: "58mm" | "80mm";
@@ -2241,14 +2237,8 @@ function ReceiptDialog({
   onClose: () => void;
   onNewSale?: () => void;
   allowPrinting?: boolean;
-  autoPrint?: boolean;
 }) {
   const printReceipt = () => window.print();
-  useEffect(() => {
-    if (!autoPrint) return;
-    const timer = window.setTimeout(() => window.print(), 300);
-    return () => window.clearTimeout(timer);
-  }, [autoPrint, receipt.sale.id]);
   const amountPaid = receipt.payments
     .filter((payment) => payment.status === "completed")
     .reduce((total, payment) => total + Number(payment.amount), 0);
@@ -3337,7 +3327,15 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const [counterNumber, setCounterNumber] = useState("");
   const [amountPaid, setAmountPaid] = useState("");
   const [receiptWidth, setReceiptWidth] = useState<"58mm" | "80mm">("80mm");
-  const [completedSaleId, setCompletedSaleId] = useState<number | null>(null);
+  const [receiptPrinterName, setReceiptPrinterName] = useState(() =>
+    typeof window === "undefined" ? "" : window.localStorage.getItem("smartpos.receiptPrinter") ?? "",
+  );
+  const [receiptPrinterDraft, setReceiptPrinterDraft] = useState("");
+  const [receiptPrinterOpen, setReceiptPrinterOpen] = useState(false);
+  const [availableReceiptPrinters, setAvailableReceiptPrinters] = useState<string[]>([]);
+  const [receiptPrinterLoading, setReceiptPrinterLoading] = useState(false);
+  const [receiptPrinterError, setReceiptPrinterError] = useState("");
+  const [receiptPrintJobs, setReceiptPrintJobs] = useState<ReceiptPrintJob[]>([]);
   const [transactionHistoryOpen, setTransactionHistoryOpen] = useState(false);
   const [transactionSearch, setTransactionSearch] = useState("");
   const [transactionDate, setTransactionDate] = useState("");
@@ -3377,6 +3375,8 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
   const idempotencyRef = useRef<string | null>(null);
   const mpesaIdempotencyRef = useRef<string | null>(null);
   const mpesaSaleHandledRef = useRef<number | null>(null);
+  const receiptPrintsInFlightRef = useRef(new Set<number>());
+  const receiptPrintsSentRef = useRef(new Set<number>());
   const processedPhoneScansRef = useRef(new Set<string>());
   const phoneScanAcknowledgementsRef = useRef(new Map<string, {
     status: "added" | "unknown" | "rejected" | "error";
@@ -3490,11 +3490,6 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     queryKey: ["sale-detail", historyReceiptId],
     queryFn: async () => (await api.get<SaleReceipt>(`/sales/${historyReceiptId}`)).data,
     enabled: historyReceiptId !== null && canViewTransactionDetails,
-  });
-  const completedReceipt = useQuery({
-    queryKey: ["pos-completed-receipt", completedSaleId],
-    queryFn: async () => (await api.get<SaleReceipt>(`/pos/sales/${completedSaleId}/receipt`)).data,
-    enabled: completedSaleId !== null,
   });
   const mpesaConfigQuery = useQuery({
     queryKey: ["mpesa-config"],
@@ -3614,6 +3609,53 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     },
     onError: (error) => setCheckoutError(getErrorMessage(error)),
   });
+  const refreshReceiptPrinters = async () => {
+    setReceiptPrinterLoading(true);
+    setReceiptPrinterError("");
+    try {
+      const printers = await discoverReceiptPrinters();
+      setAvailableReceiptPrinters(printers);
+      setReceiptPrinterDraft((current) =>
+        printers.includes(current) ? current : suggestReceiptPrinter(printers));
+    } catch (error) {
+      setReceiptPrinterError(getErrorMessage(error));
+    } finally {
+      setReceiptPrinterLoading(false);
+    }
+  };
+  async function runReceiptPrint(saleId: number, receiptNumber: string): Promise<void> {
+    if (receiptPrintsInFlightRef.current.has(saleId) || receiptPrintsSentRef.current.has(saleId)) return;
+    receiptPrintsInFlightRef.current.add(saleId);
+    setReceiptPrintJobs((jobs) => [
+      { saleId, receiptNumber, status: "printing" as const },
+      ...jobs.filter((job) => job.saleId !== saleId),
+    ].slice(0, 5));
+    try {
+      const { data: receipt } = await api.get<SaleReceipt>(`/pos/sales/${saleId}/receipt`);
+      let printer = receiptPrinterName;
+      if (!printer) {
+        printer = suggestReceiptPrinter(await discoverReceiptPrinters());
+        if (!printer) {
+          throw new Error("No receipt printer is selected. Open Receipt Printer Settings and choose the installed 80mm printer.");
+        }
+        setReceiptPrinterName(printer);
+        window.localStorage.setItem("smartpos.receiptPrinter", printer);
+      }
+      await print80mmReceipt(receipt, printer);
+      receiptPrintsSentRef.current.add(saleId);
+      setReceiptPrintJobs((jobs) => jobs.map((job) =>
+        job.saleId === saleId ? { ...job, status: "printed", error: undefined } : job));
+      setToast(`Sale ${receiptNumber} completed. Receipt sent to ${printer}.`);
+      window.setTimeout(() => {
+        setReceiptPrintJobs((jobs) => jobs.filter((job) => job.saleId !== saleId || job.status !== "printed"));
+      }, 8_000);
+    } catch (error) {
+      setReceiptPrintJobs((jobs) => jobs.map((job) =>
+        job.saleId === saleId ? { ...job, status: "failed", error: getErrorMessage(error) } : job));
+    } finally {
+      receiptPrintsInFlightRef.current.delete(saleId);
+    }
+  }
   const checkout = useMutation({
     mutationFn: async () => {
       if (!idempotencyRef.current) idempotencyRef.current = createUuid();
@@ -3671,7 +3713,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       }
       const sale = result.sale;
       setToast(`Sale ${sale.receiptNumber} completed · Ready for a new sale.`);
-      setCompletedSaleId(sale.id);
+      void runReceiptPrint(sale.id, sale.receiptNumber);
       setCart([]);
       setSaleDiscount("0.00");
       setAmountPaid("");
@@ -3681,6 +3723,9 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
       setCashAllocation("");
       setBankVerification(null);
       setMpesaPaymentId(null);
+      setMpesaPhone("");
+      setMpesaDescription("Retail purchase");
+      setMpesaError("");
       mpesaIdempotencyRef.current = null;
       mpesaSaleHandledRef.current = null;
       setCheckoutError("");
@@ -3738,18 +3783,21 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     },
     onError: (error) => setMpesaError(getErrorMessage(error)),
   });
-  const completeMpesaSale = (saleId: number) => {
+  const completeMpesaSale = (saleId: number, receiptNumber = `#${saleId}`) => {
     setToast(`Sale #${saleId} completed · Ready for a new sale.`);
-    setCompletedSaleId(saleId);
+    void runReceiptPrint(saleId, receiptNumber);
     setCart([]);
     setSaleDiscount("0.00");
     setAmountPaid("");
     setPaymentMethod("cash");
+    setCardReference("");
     setBankReference("");
     setCashAllocation("");
     setBankVerification(null);
     setMpesaDialogOpen(false);
     setMpesaPaymentId(null);
+    setMpesaPhone("");
+    setMpesaDescription("Retail purchase");
     setMpesaError("");
     mpesaIdempotencyRef.current = null;
     idempotencyRef.current = null;
@@ -3763,7 +3811,7 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
     const payment = mpesaPaymentQuery.data?.payment;
     if (payment?.status === "succeeded" && payment.saleId && mpesaSaleHandledRef.current !== payment.saleId) {
       mpesaSaleHandledRef.current = payment.saleId;
-      completeMpesaSale(payment.saleId);
+      completeMpesaSale(payment.saleId, payment.receiptNumber ?? `#${payment.saleId}`);
     }
   }, [mpesaPaymentQuery.data?.payment.status, mpesaPaymentQuery.data?.payment.saleId]);
   const retrieveHeldSaleMutation = useMutation({
@@ -4231,6 +4279,12 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
               setPhonePairingError("");
               if (!phonePairing) createPhonePairing.mutate();
             }}><Smartphone size={17} /> Phone scanner</button>
+            <button disabled={mpesaPaymentUnresolved} onClick={() => {
+              setReceiptPrinterDraft(receiptPrinterName);
+              setReceiptPrinterError("");
+              setReceiptPrinterOpen(true);
+              void refreshReceiptPrinters();
+            }}><Printer size={17} /> Receipt printer <small>{receiptPrinterName ? "Set" : "Setup"}</small></button>
             {canViewTransactionHistory && <button
               type="button"
               aria-expanded={transactionHistoryOpen}
@@ -4331,10 +4385,60 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
           ● {posConnectionStatus}{pendingOfflineCount > 0 ? ` · ${pendingOfflineCount} pending` : ""}
         </b>
       </footer>
-      {completedReceipt.isError && <ErrorBanner
-        message={`Sale was saved, but its receipt could not be loaded: ${getErrorMessage(completedReceipt.error)}`}
-        onRetry={() => void completedReceipt.refetch()}
-      />}
+      {receiptPrintJobs.map((job) => <div
+        key={job.saleId}
+        className={`receipt-print-banner receipt-print-${job.status}`}
+        role={job.status === "failed" ? "alert" : "status"}
+        aria-live={job.status === "failed" ? "assertive" : "polite"}
+      >
+        <span>{job.status === "printing"
+          ? `Sale ${job.receiptNumber} is saved. Sending its receipt to the printer…`
+          : job.status === "printed"
+            ? `Receipt ${job.receiptNumber} sent to the printer.`
+            : `Sale ${job.receiptNumber} is saved, but printing failed: ${job.error}`}</span>
+        {job.status === "failed" && <button
+          type="button"
+          disabled={receiptPrintsInFlightRef.current.has(job.saleId)}
+          onClick={() => void runReceiptPrint(job.saleId, job.receiptNumber)}
+        >Retry receipt</button>}
+      </div>)}
+      {receiptPrinterOpen && <div className="pos-confirm-screen pos-payment-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="receipt-printer-title">
+        <section className="pos-payment-dialog receipt-printer-dialog">
+          <button type="button" className="pos-payment-dialog-close" aria-label="Close printer settings" onClick={() => setReceiptPrinterOpen(false)}><X size={18} /></button>
+          <span className="pos-confirm-eyebrow">LOCAL RECEIPT PRINTER</span>
+          <h2 id="receipt-printer-title">Receipt printer settings</h2>
+          <p>QZ Tray connects this register to an installed 80mm printer. The printer selection is saved on this cashier computer.</p>
+          <label className="pos-modal-input">Installed printer
+            <select
+              value={receiptPrinterDraft}
+              onChange={(event) => setReceiptPrinterDraft(event.target.value)}
+              disabled={receiptPrinterLoading}
+            >
+              <option value="">Select a printer</option>
+              {availableReceiptPrinters.map((printer) => <option key={printer} value={printer}>{printer}</option>)}
+            </select>
+          </label>
+          <div className="receipt-printer-connection" role="status">
+            {receiptPrinterLoading
+              ? "Connecting to QZ Tray and checking installed printers…"
+              : availableReceiptPrinters.length
+                ? `QZ Tray connected · ${availableReceiptPrinters.length} printer(s) detected`
+                : "No printer list available. Make sure QZ Tray is installed and running."}
+          </div>
+          {receiptPrinterError && <div className="mpesa-modal-notice" role="alert">{receiptPrinterError}</div>}
+          <div className="pos-confirm-actions">
+            <button type="button" className="confirm" disabled={!receiptPrinterDraft || receiptPrinterLoading} onClick={() => {
+              setReceiptPrinterName(receiptPrinterDraft);
+              window.localStorage.setItem("smartpos.receiptPrinter", receiptPrinterDraft);
+              setReceiptPrinterOpen(false);
+            }}>Save printer</button>
+            <button type="button" className="cancel" disabled={receiptPrinterLoading} onClick={() => void refreshReceiptPrinters()}>
+              {receiptPrinterLoading ? "Checking…" : "Refresh printers"}
+            </button>
+            <button type="button" className="cancel" onClick={() => setReceiptPrinterOpen(false)}>Cancel</button>
+          </div>
+        </section>
+      </div>}
       {paymentMethodOpen && <div className="pos-confirm-screen pos-payment-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="payment-method-title">
         <section className="pos-payment-dialog">
           <button type="button" className="pos-payment-dialog-close" aria-label="Close payment methods" onClick={() => setPaymentMethodOpen(false)}><X size={18} /></button>
@@ -4541,14 +4645,6 @@ function PosPage({ user, cashier, onLogout }: { user: User; cashier: { id: numbe
           </div>
         </section>
       </div>}
-      {completedReceipt.data && <ReceiptDialog
-        receipt={completedReceipt.data}
-        width={receiptWidth}
-        onWidthChange={setReceiptWidth}
-        onClose={() => setCompletedSaleId(null)}
-        allowPrinting
-        autoPrint
-      />}
       {historyReceipt.data && <ReceiptDialog
         receipt={historyReceipt.data}
         width={receiptWidth}

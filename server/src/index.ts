@@ -18,6 +18,7 @@ import {
 } from "./sales.js";
 import { HttpError } from "./errors.js";
 import { isAllowedClientOrigin } from "./origin-policy.js";
+import { getQzSigningCredentials, signQzRequest } from "./qz-printing.js";
 import {
   canAssignStaffRole, createStaff, createStaffSchema, listBranches, listDepartments, listRolePermissions,
   listStaff, listStaffActivity, manageableModuleIds, modulePermissionOverridesSchema, modulePermissionsSchema,
@@ -112,6 +113,7 @@ app.use((req, res, next) => {
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: "draft-8", legacyHeaders: false });
 const productLookupLimiter = rateLimit({ windowMs: 60 * 1000, limit: 20, standardHeaders: "draft-8", legacyHeaders: false });
 const mpesaCallbackLimiter = rateLimit({ windowMs: 60 * 1000, limit: 120, standardHeaders: "draft-8", legacyHeaders: false });
+const qzSigningLimiter = rateLimit({ windowMs: 60 * 1000, limit: 120, standardHeaders: "draft-8", legacyHeaders: false });
 
 function positiveId(value: string | string[] | undefined): number | undefined {
   if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) return undefined;
@@ -1532,6 +1534,35 @@ app.get("/api/pos/sales/:id/receipt", authenticate, authenticatePos, requireModu
     const receipt = await loadSaleReceipt(id, req.user!.branchId, req.user!.id);
     if (!receipt) { res.status(404).json({ error: "Sale not found." }); return; }
     res.json(receipt);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/pos/printing/qz/certificate", authenticate, authenticatePos, requireModule("pos"), requireRoles("admin", "manager", "cashier"), (_req, res) => {
+  const credentials = getQzSigningCredentials();
+  if (!credentials) {
+    res.status(503).json({ error: "QZ Tray signing is not configured on the server." });
+    return;
+  }
+  res.setHeader("Cache-Control", "no-store");
+  res.type("text/plain").send(credentials.certificate);
+});
+
+app.post("/api/pos/printing/qz/signature", authenticate, authenticatePos, requireModule("pos"), requireRoles("admin", "manager", "cashier"), qzSigningLimiter, (req, res, next) => {
+  const input = z.object({ request: z.string().min(1).max(80_000) }).strict().safeParse(req.body);
+  if (!input.success) {
+    res.status(400).json({ error: "Invalid QZ Tray signing request." });
+    return;
+  }
+  const credentials = getQzSigningCredentials();
+  if (!credentials) {
+    res.status(503).json({ error: "QZ Tray signing is not configured on the server." });
+    return;
+  }
+  try {
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ signature: signQzRequest(input.data.request, credentials.privateKey) });
   } catch (error) {
     next(error);
   }
