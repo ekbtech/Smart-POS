@@ -39,6 +39,17 @@ const greeting = new Intl.DateTimeFormat("en-KE", { weekday: "long", month: "lon
 const timeGreeting = new Date().getHours() < 12 ? "Good morning" : new Date().getHours() < 17 ? "Good afternoon" : "Good evening";
 const dateInputValue = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 type PosCartLine = { lineId: number; product: Product; quantity: number };
+type ProductLookupResponse = {
+  found: boolean;
+  duplicate?: { id: number; sku: string; name: string; isActive: boolean };
+  externalLookupSkipped?: boolean;
+  name?: string;
+  brand?: string;
+  category?: string;
+  packageSize?: string;
+  description?: string;
+  imageUrl?: string;
+};
 type ReceiptPrintJob = {
   saleId: number;
   receiptNumber: string;
@@ -70,6 +81,11 @@ const unitForPackageSize = (value: string): Product["unit"] | undefined => {
   if (unit === "ml") return "ml";
   if (unit === "l" || unit === "litre" || unit === "liter") return "litre";
   return undefined;
+};
+const normalizedCategory = (value: string) => value.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+const matchingCategory = (suggestion: string, existingCategories: string[] | undefined) => {
+  const candidates = suggestion.split(/[>,]/).map(normalizedCategory).filter(Boolean);
+  return existingCategories?.find((category) => candidates.includes(normalizedCategory(category)));
 };
 const generateInternalBarcode = () => {
   const randomParts = crypto.getRandomValues(new Uint32Array(2));
@@ -630,6 +646,7 @@ function ProductsPage({ user }: { user: User }) {
   const [formError, setFormError] = useState("");
   const [success, setSuccess] = useState("");
   const [lookupMessage, setLookupMessage] = useState("");
+  const [lookupNeedsRetry, setLookupNeedsRetry] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [productFormOpen, setProductFormOpen] = useState(true);
   const [imageFile, setImageFile] = useState<File | null>(null);
@@ -647,8 +664,9 @@ function ProductsPage({ user }: { user: User }) {
   const productVideoRef = useRef<HTMLVideoElement>(null);
   const productCameraControlsRef = useRef<{ stop: () => void } | null>(null);
   const productBarcodeHandledRef = useRef(false);
-  const barcodeLookupRequestRef = useRef(false);
   const lastLookupBarcodeRef = useRef("");
+  const lastLookupResultRef = useRef<{ barcode: string; result: ProductLookupResponse } | null>(null);
+  const barcodeLookupRequestsRef = useRef(new Map<string, Promise<ProductLookupResponse | null>>());
   const processedRegistrationScansRef = useRef(new Set<string>());
   const registrationScanProcessingRef = useRef(false);
   const autoLookupValuesRef = useRef<Partial<Record<"name" | "brand" | "category" | "packageSize" | "description" | "unit", string>>>({});
@@ -674,23 +692,17 @@ function ProductsPage({ user }: { user: User }) {
     sellingPrice: "", purchasePrice: "", taxRate: "0", reorderLevel: "0", openingStock: "0",
   };
   const form = useForm<ProductForm>({ resolver: zodResolver(schema), defaultValues: emptyForm });
+  const barcodeInputValue = form.watch("barcode") ?? "";
   const barcodeLookup = useMutation({
-    mutationFn: async (barcode: string) => (await api.post<{
-      found: boolean;
-      duplicate?: { id: number; sku: string; name: string; isActive: boolean };
-      externalLookupSkipped?: boolean;
-      name?: string;
-      brand?: string;
-      category?: string;
-      packageSize?: string;
-      description?: string;
-      imageUrl?: string;
-    }>("/products/lookup/barcode", { barcode })).data,
+    mutationFn: async (barcode: string) => (await api.post<ProductLookupResponse>("/products/lookup/barcode", { barcode })).data,
     onSuccess: (result, barcode) => {
+      if ((form.getValues("barcode") ?? "").trim() !== barcode) return;
       lastLookupBarcodeRef.current = barcode;
+      lastLookupResultRef.current = { barcode, result };
       if (result.duplicate) {
         setLookupImageUrl(null);
         autoLookupValuesRef.current = {};
+        setLookupNeedsRetry(false);
         const status = result.duplicate.isActive ? "active" : "archived";
         const message = `Barcode already belongs to ${status} product ${result.duplicate.name} (${result.duplicate.sku}).`;
         setLookupMessage(message);
@@ -700,46 +712,55 @@ function ProductsPage({ user }: { user: User }) {
       if (!result.found) {
         setLookupImageUrl(null);
         autoLookupValuesRef.current = {};
+        setLookupNeedsRetry(true);
         setLookupMessage(result.externalLookupSkipped
-          ? "This barcode format is not supported by the external catalogue. The barcode was kept; enter product details manually."
-          : "Barcode not found in Open Food Facts. The barcode was kept; enter product details manually.");
+          ? "Online product lookup supports valid UPC/EAN codes. This barcode was kept; enter product details manually."
+          : "Product not found. Please enter product details manually.");
         return;
       }
-      autoLookupValuesRef.current = {};
-      if (result.name) {
-        form.setValue("name", result.name, { shouldDirty: true });
-        autoLookupValuesRef.current.name = result.name;
-      }
-      if (result.brand) {
-        form.setValue("brand", result.brand, { shouldDirty: true });
-        autoLookupValuesRef.current.brand = result.brand;
-      }
-      if (result.category) {
-        form.setValue("category", result.category, { shouldDirty: true });
-        autoLookupValuesRef.current.category = result.category;
-      }
+      setLookupNeedsRetry(false);
+      const setLookupField = (
+        field: "name" | "brand" | "category" | "packageSize" | "description",
+        value: string | undefined,
+      ) => {
+        if (!value) return;
+        const currentValue = form.getValues(field) ?? "";
+        const previousLookupValue = autoLookupValuesRef.current[field];
+        if (currentValue && currentValue !== previousLookupValue) return;
+        if (field === "name") form.setValue("name", value, { shouldDirty: true });
+        else if (field === "brand") form.setValue("brand", value, { shouldDirty: true });
+        else if (field === "category") form.setValue("category", value, { shouldDirty: true });
+        else if (field === "packageSize") form.setValue("packageSize", value, { shouldDirty: true });
+        else form.setValue("description", value, { shouldDirty: true });
+        autoLookupValuesRef.current[field] = value;
+      };
+      setLookupField("name", result.name);
+      setLookupField("brand", result.brand);
+      setLookupField("category", result.category
+        ? matchingCategory(result.category, categories.data) ?? result.category
+        : undefined);
       if (result.packageSize) {
-        form.setValue("packageSize", result.packageSize, { shouldDirty: true });
-        autoLookupValuesRef.current.packageSize = result.packageSize;
+        setLookupField("packageSize", result.packageSize);
         const unit = unitForPackageSize(result.packageSize);
-        if (unit) {
+        const currentUnit = form.getValues("unit");
+        const previousUnit = autoLookupValuesRef.current.unit;
+        if (unit && (!form.getFieldState("unit").isDirty || currentUnit === previousUnit)) {
           form.setValue("unit", unit, { shouldDirty: true });
           autoLookupValuesRef.current.unit = unit;
         }
       }
-      if (result.description) {
-        form.setValue("description", result.description, { shouldDirty: true });
-        autoLookupValuesRef.current.description = result.description;
-      }
+      setLookupField("description", result.description);
       setLookupImageUrl(result.imageUrl ?? null);
-      setLookupMessage(`Product information found for ${barcode}. Review and edit it before saving.`);
+      const categoryMatched = result.category && matchingCategory(result.category, categories.data);
+      setLookupMessage(`Product information found for ${barcode}${result.category && !categoryMatched ? `; review the suggested category “${result.category}”` : ""}. Review and edit it before saving.`);
       setFormError("");
     },
-    onError: (error) => {
-      setLookupMessage("");
+    onError: (error, barcode) => {
+      if ((form.getValues("barcode") ?? "").trim() !== barcode) return;
+      setLookupNeedsRetry(true);
+      setLookupMessage("Online lookup failed. The barcode was kept; retry or enter product details manually.");
       setFormError(`${getErrorMessage(error)} The scanned barcode remains in the form; enter product details manually.`);
     },
-    onSettled: () => { barcodeLookupRequestRef.current = false; },
   });
   const createRegistrationPairing = useMutation({
     mutationFn: async () => {
@@ -773,29 +794,54 @@ function ProductsPage({ user }: { user: User }) {
     refetchInterval: 1200,
     retry: false,
   });
-  const lookupBarcode = (barcode: string) => {
+  const lookupBarcode = (barcode: string, retry = false): Promise<ProductLookupResponse | null> => {
     const value = barcode.trim();
-    if (barcodeLookupRequestRef.current) return;
     if (!/^[\x21-\x7E]{1,64}$/.test(value)) {
       setFormError("Enter a printable barcode of up to 64 characters.");
-      return;
+      return Promise.resolve(null);
+    }
+    const activeRequest = barcodeLookupRequestsRef.current.get(value);
+    if (activeRequest) return activeRequest;
+    if (!retry && lastLookupResultRef.current?.barcode === value) {
+      return Promise.resolve(lastLookupResultRef.current.result);
     }
     if (lastLookupBarcodeRef.current && lastLookupBarcodeRef.current !== value) {
       for (const [field, previousValue] of Object.entries(autoLookupValuesRef.current) as Array<[keyof typeof autoLookupValuesRef.current, string]>) {
         if (form.getValues(field) === previousValue) {
-          form.setValue(field, field === "unit" ? "piece" : "", { shouldDirty: true });
+          if (field === "unit") form.resetField("unit", { defaultValue: "piece" });
+          else form.setValue(field, "", { shouldDirty: true });
         }
       }
       autoLookupValuesRef.current = {};
       lastLookupBarcodeRef.current = "";
+      lastLookupResultRef.current = null;
       setLookupImageUrl(null);
     }
     setFormError("");
     setSuccess("");
     setLookupMessage("");
-    barcodeLookupRequestRef.current = true;
-    barcodeLookup.mutate(value);
+    setLookupNeedsRetry(false);
+    const request = (async () => {
+      try {
+        return await barcodeLookup.mutateAsync(value);
+      } catch {
+        return null;
+      } finally {
+        barcodeLookupRequestsRef.current.delete(value);
+      }
+    })();
+    barcodeLookupRequestsRef.current.set(value, request);
+    return request;
   };
+  useEffect(() => {
+    if (editingProduct) return;
+    const value = barcodeInputValue.trim();
+    if (!/^[\x21-\x7E]{3,64}$/.test(value)) return;
+    if (lastLookupResultRef.current?.barcode === value) return;
+    const delay = /^\d{8}$|^\d{12,14}$/.test(value) ? 450 : 800;
+    const timer = window.setTimeout(() => { void lookupBarcode(value); }, delay);
+    return () => window.clearTimeout(timer);
+  }, [barcodeInputValue, editingProduct]);
   const disconnectRegistrationScanner = useMutation({
     mutationFn: () => api.delete(`/products/scanner/pairing/${registrationPairing!.id}`),
     onSuccess: () => {
@@ -821,19 +867,14 @@ function ProductsPage({ user }: { user: User }) {
         productName?: string;
       };
       try {
-        if (lastLookupBarcodeRef.current && lastLookupBarcodeRef.current !== scan.barcode) {
-          for (const [field, previousValue] of Object.entries(autoLookupValuesRef.current) as Array<[keyof typeof autoLookupValuesRef.current, string]>) {
-            if (form.getValues(field) === previousValue) {
-              form.setValue(field, field === "unit" ? "piece" : "", { shouldDirty: true });
-            }
-          }
-          autoLookupValuesRef.current = {};
-          lastLookupBarcodeRef.current = "";
-          setLookupImageUrl(null);
-        }
         form.setValue("barcode", scan.barcode, { shouldDirty: true });
-        const result = await barcodeLookup.mutateAsync(scan.barcode);
-        if (result.duplicate) {
+        const result = await lookupBarcode(scan.barcode);
+        if (!result) {
+          acknowledgement = {
+            status: "error",
+            message: "Online product lookup failed. Barcode kept; enter product details manually.",
+          };
+        } else if (result.duplicate) {
           acknowledgement = {
             status: "rejected",
             message: `Barcode is already registered to ${result.duplicate.name}.`,
@@ -964,6 +1005,7 @@ function ProductsPage({ user }: { user: User }) {
       setLookupImageUrl(null);
       autoLookupValuesRef.current = {};
       lastLookupBarcodeRef.current = "";
+      lastLookupResultRef.current = null;
       setFormError("");
       setLookupMessage("");
       setSuccess(imageError
@@ -1007,6 +1049,7 @@ function ProductsPage({ user }: { user: User }) {
       setLookupImageUrl(null);
       autoLookupValuesRef.current = {};
       lastLookupBarcodeRef.current = "";
+      lastLookupResultRef.current = null;
       setLookupMessage("");
       form.reset(emptyForm);
       setSuccess(imageError ? `Product details saved, but its image could not be uploaded: ${imageError}` : "Product details updated.");
@@ -1144,7 +1187,7 @@ function ProductsPage({ user }: { user: User }) {
         <p className="create-description">{editingProduct ? "Update product details while preserving its existing inventory history." : "Identify the product, confirm its details and set the opening stock for this branch."}</p>
         <form className="product-form" onSubmit={form.handleSubmit((values) => { setFormError(""); setSuccess(""); editingProduct ? update.mutate(values) : create.mutate(values); })}>
           <section className="product-scan-panel" aria-labelledby="product-scan-heading">
-            <div className="product-scan-copy"><div className="product-scan-icon"><ScanBarcode size={22} /></div><div><h3 id="product-scan-heading">Scan product barcode</h3><p>USB scanners can scan directly here. Look up new barcodes against the local catalogue first, then external product information.</p></div></div>
+            <div className="product-scan-copy"><div className="product-scan-icon"><ScanBarcode size={22} /></div><div><h3 id="product-scan-heading">Scan product barcode</h3><p>USB scanners can scan directly here. New UPC/EAN codes are checked automatically against your catalogue and online product sources.</p></div></div>
             <div className="product-scan-controls">
               <label className="product-scan-input" htmlFor="product-registration-barcode">
                 <span>Barcode</span>
@@ -1156,8 +1199,8 @@ function ProductsPage({ user }: { user: User }) {
                 }} />
               </label>
               <button className="small-action" type="button" disabled={barcodeLookup.isPending} onClick={() => { setBarcodeCameraError(""); setManualLookupBarcode(form.getValues("barcode") ?? ""); setBarcodeCameraOpen(true); }}><Camera size={15} /> Camera</button>
-              <button className="small-action product-lookup-button" type="button" disabled={barcodeLookup.isPending} onClick={() => lookupBarcode(form.getValues("barcode") ?? "")}>
-                {barcodeLookup.isPending ? <><RefreshCw size={14} className="product-loading-icon" /> Looking up…</> : <><Search size={14} /> Look up</>}
+              <button className="small-action product-lookup-button" type="button" disabled={barcodeLookup.isPending} onClick={() => { void lookupBarcode(form.getValues("barcode") ?? "", lookupNeedsRetry); }}>
+                {barcodeLookup.isPending ? <><RefreshCw size={14} className="product-loading-icon" /> Looking up…</> : <><Search size={14} /> {lookupNeedsRetry ? "Retry lookup" : "Look up"}</>}
               </button>
               {!editingProduct && <button className="button button-dark product-phone-scanner-button" type="button" disabled={createRegistrationPairing.isPending} onClick={() => {
                 setRegistrationScannerOpen(true);
@@ -1169,7 +1212,7 @@ function ProductsPage({ user }: { user: User }) {
                 }
               }}><Smartphone size={16} /> {createRegistrationPairing.isPending ? "Creating QR…" : "Connect Phone Scanner"}</button>}
             </div>
-            <div className="product-scan-feedback" aria-live="polite">
+            <div className={`product-scan-feedback${lookupNeedsRetry ? " is-retry" : ""}`} aria-live="polite">
               {barcodeLookup.isPending
                 ? <><RefreshCw size={14} className="product-loading-icon" /> Checking the catalogue and product sources…</>
                 : lookupMessage
@@ -1183,6 +1226,7 @@ function ProductsPage({ user }: { user: User }) {
               setLookupImageUrl(null);
               autoLookupValuesRef.current = {};
               lastLookupBarcodeRef.current = "";
+              lastLookupResultRef.current = null;
               setLookupMessage("");
               setSuccess("An internal-use EAN-13 barcode was generated. Print or attach a matching label before using it.");
               setFormError("");
@@ -1196,7 +1240,7 @@ function ProductsPage({ user }: { user: User }) {
                 <span className="product-image-label">Product image</span>
                 <div className="product-image-preview">
                   {imagePreview || lookupImageUrl || (editingProduct?.hasImage ? `/api/products/${editingProduct.id}/image` : null)
-                    ? <img src={imagePreview ?? lookupImageUrl ?? `/api/products/${editingProduct!.id}/image`} alt="Product preview" />
+                    ? <img src={imagePreview ?? lookupImageUrl ?? `/api/products/${editingProduct!.id}/image`} alt="Product preview" onError={() => { if (lookupImageUrl) setLookupImageUrl(null); }} />
                     : <div className="product-image-empty"><PackagePlus size={30} /><span>Product image preview</span></div>}
                 </div>
                 <div className="product-image-actions">
@@ -1260,6 +1304,7 @@ function ProductsPage({ user }: { user: User }) {
                 setLookupImageUrl(null);
                 autoLookupValuesRef.current = {};
                 lastLookupBarcodeRef.current = "";
+                lastLookupResultRef.current = null;
                 setLookupMessage("");
                 setFormError("");
               }}><RotateCcw size={14} /> Reset</button>
@@ -1271,6 +1316,7 @@ function ProductsPage({ user }: { user: User }) {
                 setLookupImageUrl(null);
                 autoLookupValuesRef.current = {};
                 lastLookupBarcodeRef.current = "";
+                lastLookupResultRef.current = null;
                 setLookupMessage("");
                 setFormError("");
                 document.getElementById("product-catalogue")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1335,6 +1381,7 @@ function ProductsPage({ user }: { user: User }) {
                     setLookupImageUrl(null);
                     autoLookupValuesRef.current = {};
                     lastLookupBarcodeRef.current = "";
+                    lastLookupResultRef.current = null;
                     setFormError("");
                     setLookupMessage("");
                     form.reset({
@@ -1361,7 +1408,7 @@ function ProductsPage({ user }: { user: User }) {
           <button className="product-barcode-close" type="button" aria-label="Close barcode scanner" onClick={() => { setBarcodeCameraOpen(false); stopProductCamera(); }}><X size={18} /></button>
           <span className="eyebrow">PRODUCT LOOKUP</span>
           <h2 id="product-barcode-title">Scan a product barcode</h2>
-          <p>Use your device camera or enter the barcode manually. Product details are retrieved from Open Food Facts when available.</p>
+          <p>Use your device camera or enter the barcode manually. Product details are retrieved automatically from online catalogues when available.</p>
           <video ref={productVideoRef} muted playsInline autoPlay aria-label="Live barcode camera preview" />
           {barcodeCameraError && <div className="pos-login-error" role="alert">{barcodeCameraError}</div>}
           <div className="product-barcode-dialog-actions">

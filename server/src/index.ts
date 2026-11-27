@@ -27,7 +27,7 @@ import {
 } from "./staff.js";
 import { productSchema, registerProduct, updateProduct, updateProductSchema } from "./products.js";
 import {
-  fetchOpenFoodFactsImage, lookupRegistrationBarcode, productBarcodeLookupSchema, productImageImportSchema,
+  fetchProductImage, lookupRegistrationBarcode, productBarcodeLookupSchema, productImageImportSchema,
 } from "./product-lookup.js";
 import {
   cashierMonitorFiltersSchema, getCashierMonitoring, getCashierMonitorDetails, getMonitoredSaleReceipt,
@@ -929,7 +929,7 @@ app.post("/api/products/:id/image/import", authenticate, requireAnyModule("produ
       [id],
     );
     if (!products[0]) { res.status(404).json({ error: "Product not found." }); return; }
-    const image = await fetchOpenFoodFactsImage(imageUrl);
+    const image = await fetchProductImage(imageUrl);
     await pool.execute(
       "UPDATE products SET image_data = ?, image_mime_type = ? WHERE id = ?",
       [image.data, image.mimeType, id],
